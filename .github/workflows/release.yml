@@ -1,0 +1,184 @@
+# ────────────────────────────────────────────────────────────────────────────
+# Release — triggered by pushing a vX.Y.Z tag.
+#
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# Produces and uploads to a GitHub Release:
+#   • comicinfo-generator-windows-x64.exe
+#   • comicinfo-generator-linux-x64.tar.gz
+#   • comicinfo-generator-linux-x64.deb     (Debian / Ubuntu)
+#   • comicinfo-generator-linux-x64.rpm     (Fedora / RHEL / openSUSE)
+#   • comicinfo-generator-macos-x64.tar.gz
+#   • comicinfo-generator-macos-arm64.tar.gz
+# ────────────────────────────────────────────────────────────────────────────
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  BIN: comicinfo-generator
+
+permissions:
+  contents: write   # needed to create GitHub Releases
+
+# ── Windows ──────────────────────────────────────────────────────────────────
+jobs:
+  build-windows:
+    name: Windows x64 (.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Rename artifact
+        run: |
+          cp target/x86_64-pc-windows-msvc/release/${{ env.BIN }}.exe `
+             ${{ env.BIN }}-windows-x64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-exe
+          path: ${{ env.BIN }}-windows-x64.exe
+
+# ── Linux ─────────────────────────────────────────────────────────────────────
+  build-linux:
+    name: Linux x64 (.tar.gz + .deb + .rpm)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev pkg-config libglib2.0-dev \
+            rpm                          # rpmbuild needed by cargo-generate-rpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      # ── .tar.gz ──────────────────────────────────────────────────────────
+      - name: Package tar.gz
+        run: |
+          cp target/x86_64-unknown-linux-gnu/release/${{ env.BIN }} .
+          tar -czf ${{ env.BIN }}-linux-x64.tar.gz ${{ env.BIN }} README.md
+          rm ${{ env.BIN }}
+
+      # ── .deb ─────────────────────────────────────────────────────────────
+      - name: Install cargo-deb
+        run: cargo install cargo-deb --locked
+
+      - name: Build .deb package
+        run: |
+          cargo deb --target x86_64-unknown-linux-gnu --no-build
+          # cargo-deb puts the file in target/x86_64-unknown-linux-gnu/debian/
+          DEB=$(ls target/x86_64-unknown-linux-gnu/debian/*.deb | head -1)
+          cp "$DEB" ${{ env.BIN }}-linux-x64.deb
+
+      # ── .rpm ─────────────────────────────────────────────────────────────
+      - name: Install cargo-generate-rpm
+        run: cargo install cargo-generate-rpm --locked
+
+      - name: Build .rpm package
+        run: |
+          # generate-rpm reads the binary from target/release, so symlink it
+          mkdir -p target/release
+          cp target/x86_64-unknown-linux-gnu/release/${{ env.BIN }} \
+             target/release/${{ env.BIN }}
+          cargo generate-rpm --target x86_64-unknown-linux-gnu
+          RPM=$(ls target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm | head -1)
+          cp "$RPM" ${{ env.BIN }}-linux-x64.rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: |
+            ${{ env.BIN }}-linux-x64.tar.gz
+            ${{ env.BIN }}-linux-x64.deb
+            ${{ env.BIN }}-linux-x64.rpm
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+  build-macos:
+    name: macOS (${{ matrix.label }}) .tar.gz
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            label: x64
+          - target: aarch64-apple-darwin
+            label: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package tar.gz
+        run: |
+          cp target/${{ matrix.target }}/release/${{ env.BIN }} .
+          tar -czf ${{ env.BIN }}-macos-${{ matrix.label }}.tar.gz \
+              ${{ env.BIN }} README.md
+          rm ${{ env.BIN }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.label }}
+          path: ${{ env.BIN }}-macos-${{ matrix.label }}.tar.gz
+
+# ── Create GitHub Release ─────────────────────────────────────────────────────
+  release:
+    name: Publish GitHub Release
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Download all artifacts built above into ./dist/
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      # Extract version from tag (strips the leading "v")
+      - name: Set version
+        id: version
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "ComicInfo Generator v${{ steps.version.outputs.VERSION }}"
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          files: dist/*

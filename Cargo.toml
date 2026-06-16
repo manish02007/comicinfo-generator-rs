@@ -1,0 +1,86 @@
+[package]
+name = "comicinfo-generator"
+version = "0.1.0"
+edition = "2021"
+description = "GUI tool for generating and embedding ComicInfo.xml in CBZ comic archive files"
+authors = ["ComicInfo Generator Contributors"]
+license = "MIT"
+repository = "https://github.com/YOUR_USERNAME/comicinfo-generator"
+homepage  = "https://github.com/YOUR_USERNAME/comicinfo-generator"
+readme = "README.md"
+keywords = ["comics", "cbz", "metadata", "manga", "gui"]
+categories = ["multimedia", "command-line-utilities"]
+rust-version = "1.80"
+
+[[bin]]
+name = "comicinfo-generator"
+path = "src/main.rs"
+
+[dependencies]
+# ── GUI ──────────────────────────────────────────────────────────────────────
+# eframe 0.29 — cross-platform (Windows / macOS / Linux X11 + Wayland)
+# default-features = false excludes accesskit (avoids atspi/zbus chain on Linux)
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+egui   = { version = "0.29", default-features = false, features = ["default_fonts"] }
+
+# ── Native file dialogs ───────────────────────────────────────────────────────
+rfd = "0.15"
+
+# ── Serialization ─────────────────────────────────────────────────────────────
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── CBZ / ZIP ─────────────────────────────────────────────────────────────────
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# ── Parallel processing ───────────────────────────────────────────────────────
+rayon = "1"
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+regex                 = "1"
+chrono                = { version = "0.4", features = ["serde"] }
+unicode-normalization = "0.1"
+dirs                  = "5"
+
+# ── Debian / Ubuntu packaging (cargo-deb) ────────────────────────────────────
+[package.metadata.deb]
+maintainer        = "ComicInfo Generator Contributors"
+copyright         = "2024, MIT licence"
+extended-description = """A modern GUI application for generating and embedding ComicInfo.xml metadata
+into CBZ comic archive files. Supports batch processing, volume/date/summary
+rules, decimal chapters, session resume, dry-run mode, and full config
+save/load. Cross-platform: Windows, macOS, Linux (X11 + Wayland)."""
+depends     = "libgtk-3-0 (>= 3.22), libc6"
+section     = "graphics"
+priority    = "optional"
+assets = [
+    ["target/release/comicinfo-generator", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/comicinfo-generator/", "644"],
+]
+
+# ── RPM packaging (cargo-generate-rpm) ───────────────────────────────────────
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/comicinfo-generator",
+      dest   = "/usr/bin/comicinfo-generator",
+      mode   = "755" },
+    { source = "README.md",
+      dest   = "/usr/share/doc/comicinfo-generator/README.md",
+      mode   = "644",
+      doc    = true },
+]
+
+[package.metadata.generate-rpm.requires]
+"gtk3" = ">= 3.22"
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+strip         = true
+codegen-units = 4
+
+[profile.dev]
+# opt-level 1 makes the debug binary noticeably faster to start up
+# (avoids the "cold startup" penalty of completely unoptimised code)
+# while keeping full debug info and short compile times.
+opt-level = 1

@@ -1,0 +1,45 @@
+# ────────────────────────────────────────────────────────────────────────────
+# CI — runs on every push and pull request.
+# Fast: only checks that the code compiles (no linking, no tests).
+# Full artifact builds happen in release.yml when you push a vX.Y.Z tag.
+# ────────────────────────────────────────────────────────────────────────────
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]   # tags are handled by release.yml
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: cargo check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+
+      # Linux only: install GTK3 + pkg-config (needed by rfd)
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev pkg-config libglib2.0-dev
+
+      - name: cargo check
+        run: cargo check --all-targets
