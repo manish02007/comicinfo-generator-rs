@@ -5,12 +5,12 @@
 #   git push origin v1.0.0
 #
 # Produces and uploads to a GitHub Release:
-#   • comicinfo-generator-windows-x64.exe
-#   • comicinfo-generator-linux-x64.tar.gz
-#   • comicinfo-generator-linux-x64.deb     (Debian / Ubuntu)
-#   • comicinfo-generator-linux-x64.rpm     (Fedora / RHEL / openSUSE)
-#   • comicinfo-generator-macos-x64.tar.gz
-#   • comicinfo-generator-macos-arm64.tar.gz
+#   • comicinfo-generator-rs-windows-x64.exe
+#   • comicinfo-generator-rs-linux-x64.tar.gz
+#   • comicinfo-generator-rs-linux-x64.deb     (Debian / Ubuntu)
+#   • comicinfo-generator-rs-linux-x64.rpm     (Fedora / RHEL / openSUSE)
+#   • comicinfo-generator-rs-macos-x64.tar.gz
+#   • comicinfo-generator-rs-macos-arm64.tar.gz
 # ────────────────────────────────────────────────────────────────────────────
 name: Release
 
@@ -22,10 +22,10 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  BIN: comicinfo-generator
+  BIN: comicinfo-generator-rs
 
 permissions:
-  contents: write   # needed to create GitHub Releases
+  contents: write # needed to create GitHub Releases
 
 # ── Windows ──────────────────────────────────────────────────────────────────
 jobs:
@@ -54,7 +54,7 @@ jobs:
           name: windows-exe
           path: ${{ env.BIN }}-windows-x64.exe
 
-# ── Linux ─────────────────────────────────────────────────────────────────────
+  # ── Linux ─────────────────────────────────────────────────────────────────────
   build-linux:
     name: Linux x64 (.tar.gz + .deb + .rpm)
     runs-on: ubuntu-latest
@@ -117,7 +117,7 @@ jobs:
             ${{ env.BIN }}-linux-x64.deb
             ${{ env.BIN }}-linux-x64.rpm
 
-# ── macOS ─────────────────────────────────────────────────────────────────────
+  # ── macOS ─────────────────────────────────────────────────────────────────────
   build-macos:
     name: macOS (${{ matrix.label }}) .tar.gz
     runs-on: macos-latest
@@ -152,7 +152,7 @@ jobs:
           name: macos-${{ matrix.label }}
           path: ${{ env.BIN }}-macos-${{ matrix.label }}.tar.gz
 
-# ── Create GitHub Release ─────────────────────────────────────────────────────
+  # ── Create GitHub Release ─────────────────────────────────────────────────────
   release:
     name: Publish GitHub Release
     needs: [build-windows, build-linux, build-macos]
