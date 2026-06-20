@@ -1529,12 +1529,14 @@ impl ComicInfoApp {
             ("XML Updated", self.disp_stats.xml,       false),
             ("Errors",      self.disp_stats.errors,    self.disp_stats.errors > 0),
         ];
-        // Stats frame: inner_margin 8 top + 8 bottom = 16, plus content
-        // (~18px number + ~7px spacing + ~12px label ≈ 37px) ≈ 53px real height.
-        // Use a generous 80px budget so it never gets clipped against the
-        // status bar even with minor font/DPI measurement differences.
-        let stats_h = 80.0;
-        let log_h   = (ui.available_height() - stats_h).max(60.0);
+        // Stats frame real height ≈ frame padding (14*2=28) + content row
+        // (~18px number + ~7px spacing + ~12px label ≈ 37px) ≈ 65px.
+        // bottom_gap reserves clear empty space between the stats box and
+        // the status bar below it, so the box's rounded corner is always
+        // fully visible instead of running flush against the footer.
+        let stats_h    = 68.0;   // now matches the smaller box (~58px real height)
+        let bottom_gap = 26.0;   // explicit, more generous gap above the status bar
+        let log_h = (ui.available_height() - stats_h - bottom_gap).max(60.0);
 
         // ── Log output ────────────────────────────────────────────────────────
         egui::Frame::none()
@@ -1569,22 +1571,38 @@ impl ComicInfoApp {
                 ui.allocate_exact_size(egui::vec2(ui.available_width(), 0.0), egui::Sense::hover());
                 ui.horizontal(|ui| {
                     ui.style_mut().spacing.item_spacing.x = 0.0;
-                    for &(lbl, val, is_err) in &st {
+                    // Distribute all 6 items evenly across the full box width,
+                    // instead of fixed-width columns left-packed with leftover
+                    // empty space on the right.
+                    let n = st.len() as f32;
+                    let divider_w = 1.0;
+                    let item_w  = ((ui.available_width() - divider_w * (n - 1.0)) / n).max(60.0);
+                    let cell_h  = 42.0; // snug fit around content (~40px), minimal extra padding
+
+                    for (i, &(lbl, val, is_err)) in st.iter().enumerate() {
                         let num_col = if is_err { theme::TERR }
                                       else if val > 0 { theme::TGOOD }
                                       else { theme::TMUT };
-                        ui.vertical(|ui| {
-                            ui.set_min_width(100.0);
-                            ui.label(RichText::new(val.to_string())
-                                .color(num_col).strong().size(18.0));
-                            ui.label(RichText::new(lbl).color(theme::TMUT).size(10.0));
-                        });
-                        // Divider
-                        let (vl, _) = ui.allocate_exact_size(
-                            egui::vec2(1.0, 36.0), egui::Sense::hover()
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(item_w, cell_h),
+                            egui::Layout::top_down(egui::Align::Center),
+                            |ui| {
+                                // Manual vertical centering: number line (~21px) +
+                                // item spacing (~7px) + label line (~12px) ≈ 40px.
+                                let content_h = 40.0_f32;
+                                let pad = ((cell_h - content_h) / 2.0).max(0.0);
+                                ui.add_space(pad);
+                                ui.label(RichText::new(val.to_string())
+                                    .color(num_col).strong().size(18.0));
+                                ui.label(RichText::new(lbl).color(theme::TMUT).size(10.0));
+                            },
                         );
-                        ui.painter().rect_filled(vl, egui::Rounding::ZERO, theme::BDR);
-                        ui.add_space(20.0);
+                        if i < st.len() - 1 {
+                            let (vl, _) = ui.allocate_exact_size(
+                                egui::vec2(divider_w, cell_h), egui::Sense::hover()
+                            );
+                            ui.painter().rect_filled(vl, egui::Rounding::ZERO, theme::BDR);
+                        }
                     }
                 });
             });
