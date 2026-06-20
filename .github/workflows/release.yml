@@ -22,7 +22,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  BIN: comicinfo-generator-rs
+  BIN: comicinfo-generator
 
 permissions:
   contents: write # needed to create GitHub Releases
