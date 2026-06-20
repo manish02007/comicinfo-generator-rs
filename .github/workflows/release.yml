@@ -159,6 +159,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history needed to diff against the previous tag
 
       # Download all artifacts built above into ./dist/
       - uses: actions/download-artifact@v4
@@ -174,11 +176,82 @@ jobs:
         id: version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
+      # ── Categorized changelog from Conventional Commits ──────────────────
+      # Reads every commit message since the previous tag and buckets it by
+      # its prefix: feat / fix / chore / docs / refactor / perf / other.
+      # Write commits like:
+      #   feat: add dry-run preview mode
+      #   fix: correct counter race condition in worker
+      #   chore: bump eframe to 0.29
+      - name: Generate changelog
+        id: changelog
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -z "$PREV_TAG" ]; then
+            RANGE=""
+          else
+            RANGE="$PREV_TAG..HEAD"
+          fi
+
+          FEATURES=$(git log $RANGE --pretty=format:"%s" | grep -E '^feat(\(.+\))?:' || true)
+          FIXES=$(git log $RANGE --pretty=format:"%s" | grep -E '^fix(\(.+\))?:' || true)
+          REFACTOR=$(git log $RANGE --pretty=format:"%s" | grep -E '^refactor(\(.+\))?:' || true)
+          PERF=$(git log $RANGE --pretty=format:"%s" | grep -E '^perf(\(.+\))?:' || true)
+          DOCS=$(git log $RANGE --pretty=format:"%s" | grep -E '^docs(\(.+\))?:' || true)
+          CHORE=$(git log $RANGE --pretty=format:"%s" | grep -E '^chore(\(.+\))?:' || true)
+          OTHERS=$(git log $RANGE --pretty=format:"%s" | grep -vE '^(feat|fix|refactor|perf|docs|chore)(\(.+\))?:' || true)
+
+          # Strip the "type:" or "type(scope):" prefix, capitalize first letter
+          clean() {
+            sed -E 's/^[a-z]+(\([^)]+\))?: ?//' | sed -E 's/^(.)/\U\1/'
+          }
+
+          echo "CHANGELOG<<EOF" >> "$GITHUB_OUTPUT"
+
+          if [ -n "$FEATURES" ]; then
+            echo "### Features" >> "$GITHUB_OUTPUT"
+            echo "$FEATURES" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$FIXES" ]; then
+            echo "### Fixes" >> "$GITHUB_OUTPUT"
+            echo "$FIXES" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$PERF" ]; then
+            echo "### Performance" >> "$GITHUB_OUTPUT"
+            echo "$PERF" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$REFACTOR" ]; then
+            echo "### Refactoring" >> "$GITHUB_OUTPUT"
+            echo "$REFACTOR" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$DOCS" ]; then
+            echo "### Documentation" >> "$GITHUB_OUTPUT"
+            echo "$DOCS" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$CHORE" ]; then
+            echo "### Chores" >> "$GITHUB_OUTPUT"
+            echo "$CHORE" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -n "$OTHERS" ]; then
+            echo "### Other changes" >> "$GITHUB_OUTPUT"
+            echo "$OTHERS" | sed -E 's/^(.)/\U\1/' | sed 's/^/- /' >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           name: "ComicInfo Generator v${{ steps.version.outputs.VERSION }}"
           draft: false
           prerelease: ${{ contains(github.ref_name, '-') }}
-          generate_release_notes: true
+          body: |
+            ${{ steps.changelog.outputs.CHANGELOG }}
           files: dist/*
