@@ -19,6 +19,11 @@ use std::sync::{
 #[derive(Debug)]
 pub enum WorkerMsg {
     Log      { text: String, level: LogLevel },
+    /// Several lines sent together as one channel message so they can never
+    /// be interleaved by another thread's messages arriving in between --
+    /// used to keep one file's whole report (detection + verbose + result)
+    /// contiguous even though multiple files are processed in parallel.
+    LogBatch (Vec<(String, LogLevel)>),
     Progress { done: usize,  total: usize },
     Stats    { stats: RunStats },
     /// Worker needs a decimal-chapter label choice from the UI thread.
@@ -185,9 +190,16 @@ fn process_one(
 
     { let mut s = stats.lock().unwrap(); s.total += 1; }
 
+    // Buffer every line for THIS file and flush it as one atomic LogBatch at
+    // the end, instead of sending each line individually -- otherwise, since
+    // multiple files are processed concurrently across rayon threads, lines
+    // from different files interleave at the per-line level based on OS
+    // thread scheduling, scrambling the log into an unreadable mix.
+    let mut batch: Vec<(String, LogLevel)> = Vec::new();
+
     let mode_str = detect_file_type(&file);
     if cfg.verbose {
-        logq(tx, format!("  -  {file}  ->  {mode_str}"), LogLevel::Dim);
+        batch.push((format!("  -  {file}  ->  {mode_str}"), LogLevel::Dim));
     }
 
     // Extract number from filename
@@ -195,7 +207,9 @@ fn process_one(
     let num_m  = match num_re.find(&file) {
         Some(m) => m,
         None => {
-            logq(tx, format!("[WARN] no number found - skipping: {file}"), LogLevel::Warn);
+            let mut result = vec![(format!("[WARN] no number found - skipping: {file}"), LogLevel::Warn)];
+            result.extend(batch);
+            flush_batch(tx, result);
             bump_done(tx, done_c, total, stats);
             return;
         }
@@ -219,10 +233,10 @@ fn process_one(
     if cfg.verbose {
         let pad_note = if number != orig_num { format!("{orig_num} -> {number} (zero-padded)") }
                        else { format!("{number} (no padding)") };
-        logq(tx, format!(
+        batch.push((format!(
             "       number={pad_note}  prefix=\"{}\" (mode={})",
             prefix_word.trim(), cfg.prefix_mode
-        ), LogLevel::Dim);
+        ), LogLevel::Dim));
     }
 
     // Title lookup
@@ -240,9 +254,9 @@ fn process_one(
     };
 
     if cfg.verbose {
-        logq(tx, format!(
+        batch.push((format!(
             "       title=\"{raw_title}\"  (source: {title_source})"
-        ), LogLevel::Dim);
+        ), LogLevel::Dim));
     }
 
     // Decimal: ask the UI for a label choice
@@ -312,7 +326,7 @@ fn process_one(
                 None    => "none (no rule matched)".to_string(),
             }
         };
-        logq(tx, format!("       volume={vol_note}"), LogLevel::Dim);
+        batch.push((format!("       volume={vol_note}"), LogLevel::Dim));
     }
 
     // Date from volume-date rules
@@ -344,7 +358,7 @@ fn process_one(
         } else {
             "not found in episode_dates.json".to_string()
         };
-        logq(tx, format!("       date={date_note}"), LogLevel::Dim);
+        batch.push((format!("       date={date_note}"), LogLevel::Dim));
     }
 
     // Summary from volume-summary rules
@@ -372,7 +386,7 @@ fn process_one(
         } else {
             "no rule matched (using default summary)".to_string()
         };
-        logq(tx, format!("       summary={summ_note}"), LogLevel::Dim);
+        batch.push((format!("       summary={summ_note}"), LogLevel::Dim));
     }
 
     let xml_content = build_comic_info_xml(&md, &cfg.custom_fields);
@@ -396,15 +410,21 @@ fn process_one(
     if cfg.dry_run {
         stats.lock().unwrap().processed += 1;
         let pos = bump_done(tx, done_c, total, stats);
-        logq(tx, format!("  [DRY] [{pos}/{total}]  {file}  ->  {new_name}"), LogLevel::Warn);
-        logq(tx, format!("           XML title: {xml_title}"), LogLevel::Dim);
+        let mut result = vec![
+            (format!("  [DRY] [{pos}/{total}]  {file}  ->  {new_name}"), LogLevel::Warn),
+            (format!("           XML title: {xml_title}"), LogLevel::Dim),
+        ];
+        result.extend(batch);
+        flush_batch(tx, result);
         return;
     } else {
         match write_comic_info_to_cbz(path, &xml_content) {
             Ok(()) => { stats.lock().unwrap().xml_updated += 1; }
             Err(e) => {
                 let msg = format!("  [ERR] {file}  -  {e}");
-                logq(tx, msg.clone(), LogLevel::Err);
+                let mut result = vec![(msg.clone(), LogLevel::Err)];
+                result.extend(batch);
+                flush_batch(tx, result);
                 append_error_log(&cfg.error_log_file, &msg);
                 stats.lock().unwrap().errors += 1;
                 bump_done(tx, done_c, total, stats);
@@ -414,7 +434,7 @@ fn process_one(
         if path != new_path && !new_path.exists() {
             match std::fs::rename(path, &new_path) {
                 Ok(())  => { stats.lock().unwrap().renamed += 1; }
-                Err(e)  => logq(tx, format!("  [WARN] rename failed: {e}"), LogLevel::Warn),
+                Err(e)  => batch.push((format!("  [WARN] rename failed: {e}"), LogLevel::Warn)),
             }
         } else if new_path.exists() && path != new_path {
             stats.lock().unwrap().rename_skipped += 1;
@@ -428,12 +448,16 @@ fn process_one(
     let pos = bump_done(tx, done_c, total, stats);
     let ctr = format!("[{pos}/{total}]");
 
-    if new_name != file {
-        logq(tx, format!("  [OK] {ctr}  {file}"), LogLevel::Ok);
-        logq(tx, format!("           ->  {new_name}"), LogLevel::Renamed);
+    let mut result = if new_name != file {
+        vec![
+            (format!("  [OK] {ctr}  {file}"), LogLevel::Ok),
+            (format!("           ->  {new_name}"), LogLevel::Renamed),
+        ]
     } else {
-        logq(tx, format!("  [OK] {ctr}  {new_name}"), LogLevel::Ok);
-    }
+        vec![(format!("  [OK] {ctr}  {new_name}"), LogLevel::Ok)]
+    };
+    result.extend(batch);
+    flush_batch(tx, result);
 }
 
 // ── XML title builder (extracted for clarity) ─────────────────────────────────
@@ -487,6 +511,15 @@ fn build_xml_title(
 // ── Helpers ───────────────────────────────────────────────────────────────────
 fn logq(tx: &Sender<WorkerMsg>, text: String, level: LogLevel) {
     let _ = tx.send(WorkerMsg::Log { text, level });
+}
+
+/// Send every buffered line for one file as a single channel message, so
+/// they arrive at the UI thread as one contiguous block instead of being
+/// interleaved with another thread's lines mid-file.
+fn flush_batch(tx: &Sender<WorkerMsg>, batch: Vec<(String, LogLevel)>) {
+    if !batch.is_empty() {
+        let _ = tx.send(WorkerMsg::LogBatch(batch));
+    }
 }
 
 fn bump_done(tx: &Sender<WorkerMsg>, done_c: &Arc<Mutex<usize>>, total: usize, stats: &Arc<Mutex<RunStats>>) -> usize {

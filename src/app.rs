@@ -385,6 +385,15 @@ impl ComicInfoApp {
                     self.log.push(LogEntry { text, level });
                     ctx.request_repaint();
                 }
+                Ok(WorkerMsg::LogBatch(lines)) => {
+                    // All of one file's lines arrive together in one message;
+                    // push them in one go so they stay contiguous in the log
+                    // even though other files' batches may interleave with
+                    // this one at the message level (unavoidable with true
+                    // parallel processing, but each file's own block is safe).
+                    self.log.extend(lines.into_iter().map(|(text, level)| LogEntry { text, level }));
+                    ctx.request_repaint();
+                }
                 Ok(WorkerMsg::Progress { done, total }) => {
                     self.progress = (done, total);
                     ctx.request_repaint();
