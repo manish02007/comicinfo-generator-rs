@@ -836,16 +836,20 @@ impl eframe::App for ComicInfoApp {
         self.poll_worker(ctx);
         self.render_dialogs(ctx);
 
+        // Vertical margins are kept EQUAL (top == bottom) on every bar so the
+        // panel sizes itself naturally around its content and that content
+        // ends up truly centered -- no guessed exact_height() + leftover slack.
         egui::TopBottomPanel::top("toolbar")
-            .frame(egui::Frame::none().fill(theme::SURF).stroke(egui::Stroke::new(1.0, theme::BDR)).inner_margin(egui::Margin::symmetric(8.0, 0.0)))
-            .exact_height(44.0)
+            .frame(egui::Frame::none().fill(theme::SURF).stroke(egui::Stroke::new(1.0, theme::BDR))
+                .inner_margin(egui::Margin::symmetric(8.0, 8.0)))
             .show(ctx, |ui| self.show_toolbar(ui));
         egui::TopBottomPanel::bottom("statusbar")
-            .frame(egui::Frame::none().fill(theme::BG).stroke(egui::Stroke::new(1.0, theme::BDR)).inner_margin(egui::Margin::symmetric(12.0, 5.0)))
-            .exact_height(26.0)
+            .frame(egui::Frame::none().fill(theme::BG).stroke(egui::Stroke::new(1.0, theme::BDR))
+                .inner_margin(egui::Margin::symmetric(12.0, 6.0)))
             .show(ctx, |ui| self.show_statusbar(ui));
         egui::TopBottomPanel::top("tabbar")
-            .frame(egui::Frame::none().fill(theme::SURF).stroke(egui::Stroke::new(1.0, theme::BDR)))
+            .frame(egui::Frame::none().fill(theme::SURF).stroke(egui::Stroke::new(1.0, theme::BDR))
+                .inner_margin(egui::Margin::symmetric(14.0, 8.0)))
             .show(ctx, |ui| self.show_tabbar(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG))
@@ -868,7 +872,6 @@ impl eframe::App for ComicInfoApp {
 impl ComicInfoApp {
     fn show_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.add_space(8.0);
             ui.label(RichText::new("ComicInfo Generator")
                 .size(14.0).color(theme::TXT).strong());
 
@@ -914,9 +917,7 @@ impl ComicInfoApp {
     }
 
     fn show_tabbar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.add_space(14.0);
             ui.style_mut().spacing.item_spacing.x = 6.0;
             for (tab, label) in [
                 (Tab::Paths,      "Paths"),
@@ -939,7 +940,6 @@ impl ComicInfoApp {
                 ).clicked() { self.tab = tab; }
             }
         });
-        ui.add_space(6.0);
     }
 }
 
