@@ -216,13 +216,34 @@ fn process_one(
     let prefix_word = get_prefix(&file, &cfg.prefix_mode, &cfg.custom_pfx);
     let base        = format!("{} {}", prefix_word.trim(), number);
 
+    if cfg.verbose {
+        let pad_note = if number != orig_num { format!("{orig_num} -> {number} (zero-padded)") }
+                       else { format!("{number} (no padding)") };
+        logq(tx, format!(
+            "       number={pad_note}  prefix=\"{}\" (mode={})",
+            prefix_word.trim(), cfg.prefix_mode
+        ), LogLevel::Dim);
+    }
+
     // Title lookup
-    let titles    = if mode_str == "volume" { &cfg.volume_titles } else { &cfg.chapter_titles };
-    let raw_title = titles.get(&orig_num)
-        .or_else(|| titles.get(&number))
-        .cloned()
-        .or_else(|| extract_title_from_filename(&file))
-        .unwrap_or_else(|| base.clone());
+    let titles = if mode_str == "volume" { &cfg.volume_titles } else { &cfg.chapter_titles };
+    let title_source: &str;
+    let raw_title: String = if let Some(t) = titles.get(&orig_num).or_else(|| titles.get(&number)) {
+        title_source = if mode_str == "volume" { "volume_titles.json" } else { "chapter_titles.json" };
+        t.clone()
+    } else if let Some(t) = extract_title_from_filename(&file) {
+        title_source = "extracted from filename";
+        t
+    } else {
+        title_source = "fallback (no title found)";
+        base.clone()
+    };
+
+    if cfg.verbose {
+        logq(tx, format!(
+            "       title=\"{raw_title}\"  (source: {title_source})"
+        ), LogLevel::Dim);
+    }
 
     // Decimal: ask the UI for a label choice
     let labelled_title = if is_decimal && mode_str != "volume" {
@@ -281,13 +302,28 @@ fn process_one(
     } else { None };
     if let Some(ref v) = volume { md.insert("Volume", v.clone()); }
 
+    if cfg.verbose {
+        let vol_note = if !cfg.use_vol {
+            "disabled".to_string()
+        } else {
+            match &volume {
+                Some(v) if mode_str == "volume" => format!("{v} (file is a volume)"),
+                Some(v) => format!("{v} (matched a volume rule)"),
+                None    => "none (no rule matched)".to_string(),
+            }
+        };
+        logq(tx, format!("       volume={vol_note}"), LogLevel::Dim);
+    }
+
     // Date from volume-date rules
+    let mut date_matched = false;
     if cfg.use_vol_date {
         if let Some(ref v) = volume {
             if let Some((y, m, d)) = find_date(v, &cfg.date_rules) {
                 md.insert("Year",  y.to_string());
                 md.insert("Month", m.to_string());
                 md.insert("Day",   d.to_string());
+                date_matched = true;
             }
         }
     } else if let Some(date_str) = cfg.dates_json.get(&orig_num) {
@@ -295,17 +331,48 @@ fn process_one(
             md.insert("Year",  dt.year().to_string());
             md.insert("Month", dt.month().to_string());
             md.insert("Day",   dt.day().to_string());
+            date_matched = true;
         }
     }
 
+    if cfg.verbose {
+        let date_note = if cfg.use_vol_date {
+            if date_matched { format!("{}-{}-{}  (matched a date rule)", md["Year"], md["Month"], md["Day"]) }
+            else { "no rule matched".to_string() }
+        } else if date_matched {
+            format!("{}-{}-{}  (from episode_dates.json)", md["Year"], md["Month"], md["Day"])
+        } else {
+            "not found in episode_dates.json".to_string()
+        };
+        logq(tx, format!("       date={date_note}"), LogLevel::Dim);
+    }
+
     // Summary from volume-summary rules
+    let mut summ_matched = false;
     if mode_str == "chapter" && orig_num == "1" {
         md.insert("Summary", cfg.summary.clone());
     } else if cfg.use_vol_summ {
         if let Some(ref v) = volume {
-            let s = find_summary(v, &cfg.summ_rules).unwrap_or_else(|| cfg.summary.clone());
-            md.insert("Summary", s);
+            if let Some(s) = find_summary(v, &cfg.summ_rules) {
+                md.insert("Summary", s);
+                summ_matched = true;
+            } else {
+                md.insert("Summary", cfg.summary.clone());
+            }
         }
+    }
+
+    if cfg.verbose {
+        let summ_note = if mode_str == "chapter" && orig_num == "1" {
+            "default summary (chapter 1)".to_string()
+        } else if !cfg.use_vol_summ {
+            "disabled (using default summary)".to_string()
+        } else if summ_matched {
+            "matched a summary rule".to_string()
+        } else {
+            "no rule matched (using default summary)".to_string()
+        };
+        logq(tx, format!("       summary={summ_note}"), LogLevel::Dim);
     }
 
     let xml_content = build_comic_info_xml(&md, &cfg.custom_fields);
