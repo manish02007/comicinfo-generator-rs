@@ -105,11 +105,11 @@ pub fn run(
         .cloned()
         .partition(is_dec);
 
-    let sep = "─".repeat(60);
+    let sep = "-".repeat(60);
     let ts = chrono::Local::now().format("%H:%M:%S");
     logq(&tx, sep.clone(), LogLevel::Sep);
     logq(&tx, format!(
-        "  🚀  Started {ts}  ·  {total} files  ({} normal  ·  {} decimal)",
+        "  [START] {ts}  -  {total} files  ({} normal  -  {} decimal)",
         normal_files.len(), decimal_files.len()
     ), LogLevel::Head);
     logq(&tx, sep.clone(), LogLevel::Sep);
@@ -187,7 +187,7 @@ fn process_one(
 
     let mode_str = detect_file_type(&file);
     if cfg.verbose {
-        logq(tx, format!("  ·  {file}  →  {mode_str}"), LogLevel::Dim);
+        logq(tx, format!("  -  {file}  ->  {mode_str}"), LogLevel::Dim);
     }
 
     // Extract number from filename
@@ -195,7 +195,7 @@ fn process_one(
     let num_m  = match num_re.find(&file) {
         Some(m) => m,
         None => {
-            logq(tx, format!("⚠  no number found — skipping: {file}"), LogLevel::Warn);
+            logq(tx, format!("[WARN] no number found - skipping: {file}"), LogLevel::Warn);
             bump_done(tx, done_c, total, stats);
             return;
         }
@@ -323,20 +323,20 @@ fn process_one(
         format!("{base}{fname_sep}{safe_t}.cbz")
     };
     let new_path = path.parent().unwrap_or(Path::new(".")).join(&new_name);
-    let counter  = {
-        let dc = done_c.lock().unwrap();
-        format!("[{}/{total}]", *dc + 1)
-    };
+    // counter computed after bump_done (see below)
 
     // ── Write / Dry-run ───────────────────────────────────────────────────────
     if cfg.dry_run {
-        logq(tx, format!("  ○  {counter}  [DRY]  {file}  →  {new_name}"), LogLevel::Warn);
+        stats.lock().unwrap().processed += 1;
+        let pos = bump_done(tx, done_c, total, stats);
+        logq(tx, format!("  [DRY] [{pos}/{total}]  {file}  ->  {new_name}"), LogLevel::Warn);
         logq(tx, format!("           XML title: {xml_title}"), LogLevel::Dim);
+        return;
     } else {
         match write_comic_info_to_cbz(path, &xml_content) {
             Ok(()) => { stats.lock().unwrap().xml_updated += 1; }
             Err(e) => {
-                let msg = format!("  ❌  {counter}  {file}  —  {e}");
+                let msg = format!("  [ERR] {file}  -  {e}");
                 logq(tx, msg.clone(), LogLevel::Err);
                 append_error_log(&cfg.error_log_file, &msg);
                 stats.lock().unwrap().errors += 1;
@@ -347,7 +347,7 @@ fn process_one(
         if path != new_path && !new_path.exists() {
             match std::fs::rename(path, &new_path) {
                 Ok(())  => { stats.lock().unwrap().renamed += 1; }
-                Err(e)  => logq(tx, format!("  ⚠  {counter}  rename failed: {e}"), LogLevel::Warn),
+                Err(e)  => logq(tx, format!("  [WARN] rename failed: {e}"), LogLevel::Warn),
             }
         } else if new_path.exists() && path != new_path {
             stats.lock().unwrap().rename_skipped += 1;
@@ -356,15 +356,17 @@ fn process_one(
     }
 
     stats.lock().unwrap().processed += 1;
+    // bump_done increments the counter and returns the new position —
+    // this is the only correct way to get the counter in parallel code.
+    let pos = bump_done(tx, done_c, total, stats);
+    let ctr = format!("[{pos}/{total}]");
 
     if new_name != file {
-        logq(tx, format!("  ✅  {counter}  {file}"), LogLevel::Ok);
-        logq(tx, format!("           →  {new_name}"), LogLevel::Renamed);
+        logq(tx, format!("  [OK] {ctr}  {file}"), LogLevel::Ok);
+        logq(tx, format!("           ->  {new_name}"), LogLevel::Renamed);
     } else {
-        logq(tx, format!("  ✅  {counter}  {new_name}"), LogLevel::Ok);
+        logq(tx, format!("  [OK] {ctr}  {new_name}"), LogLevel::Ok);
     }
-
-    bump_done(tx, done_c, total, stats);
 }
 
 // ── XML title builder (extracted for clarity) ─────────────────────────────────
@@ -420,11 +422,12 @@ fn logq(tx: &Sender<WorkerMsg>, text: String, level: LogLevel) {
     let _ = tx.send(WorkerMsg::Log { text, level });
 }
 
-fn bump_done(tx: &Sender<WorkerMsg>, done_c: &Arc<Mutex<usize>>, total: usize, stats: &Arc<Mutex<RunStats>>) {
+fn bump_done(tx: &Sender<WorkerMsg>, done_c: &Arc<Mutex<usize>>, total: usize, stats: &Arc<Mutex<RunStats>>) -> usize {
     let dc = { let mut dc = done_c.lock().unwrap(); *dc += 1; *dc };
     let s  = stats.lock().unwrap().clone();
     let _ = tx.send(WorkerMsg::Progress { done: dc, total });
     let _ = tx.send(WorkerMsg::Stats { stats: s });
+    dc
 }
 
 fn mark_done(progress_file: &Path, filename: &str) {
