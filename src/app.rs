@@ -81,6 +81,8 @@ pub struct ComicInfoApp {
     pub progress:   (usize, usize),
     pub disp_stats: DisplayStats,
     pub log:        Vec<LogEntry>,
+    // Deferred run (set in dialogs, processed before rendering)
+    pub pending_start: Option<(Vec<std::path::PathBuf>, std::collections::HashSet<String>, bool)>,
     // Autosave
     pub last_save:  std::time::Instant,
 }
@@ -103,6 +105,7 @@ impl ComicInfoApp {
             progress:    (0, 0),
             disp_stats:  DisplayStats::default(),
             log:         Vec::new(),
+            pending_start: None,
             last_save:   std::time::Instant::now(),
         };
         app.load_autosave();
@@ -175,7 +178,7 @@ impl ComicInfoApp {
                 // Key has no embedded quotes; value may contain commas and spaces.
                 // Separator is `": "` (3 chars: closing-quote, colon, space).
                 if let Some(sep) = trimmed.find("\": \"") {
-                    // Everything before sep is `"Key`  → strip leading `"`
+                    // Everything before sep is `"Key`  -> strip leading `"`
                     let key_raw = trimmed[..sep].trim().trim_start_matches('"');
                     // After sep we have: `"` + 3 chars(`": "`) = sep+4 starts the value
                     let rest = &trimmed[sep + 4..];
@@ -243,7 +246,7 @@ impl ComicInfoApp {
         // ── Apply extracted key-value pairs to config ─────────────────────
         for (key, val) in &kv_pairs {
             let display_val = if val.len() > 80 {
-                format!("{}…", &val[..77])
+                format!("{}...", &val[..77])
             } else {
                 val.clone()
             };
@@ -407,14 +410,14 @@ impl ComicInfoApp {
                         renamed: stats.renamed, skipped: stats.rename_skipped,
                         xml: stats.xml_updated, errors: stats.errors,
                     };
-                    let sep = "─".repeat(60);
+                    let sep = "-".repeat(60);
                     let ts  = chrono::Local::now().format("%H:%M:%S");
                     self.log.push(LogEntry { text: sep.clone(),                             level: LogLevel::Sep });
                     let (msg, lvl, st) = if stats.errors > 0 {
-                        (format!("  ⚠  Done {ts}  ·  {} errors", stats.errors), LogLevel::Warn,
-                         format!("Done — {} error(s).", stats.errors))
+                        (format!("  [DONE] {ts}  -  {} errors", stats.errors), LogLevel::Warn,
+                         format!("Done  -  {} error(s).", stats.errors))
                     } else {
-                        (format!("  🎉  Done {ts}  ·  {} processed  ·  {} renamed  ·  0 errors",
+                        (format!("  [DONE] {ts}  -  {} processed  -  {} renamed  -  0 errors",
                                  stats.processed, stats.renamed), LogLevel::Ok, "Done.".to_string())
                     };
                     self.log.push(LogEntry { text: msg, level: lvl });
@@ -500,12 +503,12 @@ impl ComicInfoApp {
         let stop = self.stop_flag.clone();
 
         if self.cfg.dry_run {
-            self.log.push(LogEntry { text: "  ⚠  DRY RUN — no files will be modified".to_string(), level: LogLevel::Warn });
+            self.log.push(LogEntry { text: "  [DRY RUN] -- no files will be modified".to_string(), level: LogLevel::Warn });
         }
         std::thread::spawn(move || crate::worker::run(cbz_files, wcfg, wtx, urx, stop));
 
         self.tab    = Tab::Run;
-        self.status = "Processing…".to_string();
+        self.status = "Processing...".to_string();
     }
 
     // ── "Start" button ────────────────────────────────────────────────────────
@@ -579,9 +582,9 @@ impl ComicInfoApp {
         let Some(dlg) = self.dialog.take() else { return };
         match dlg {
             Dialog::EditRule(mut s) => {
-                let mut open = true; let mut saved = false; let mut cancelled = false;
+                let mut saved = false; let mut cancelled = false;
                 egui::Window::new(if s.is_new { "Add Rule" } else { "Edit Rule" })
-                    .open(&mut open).resizable(true).collapsible(false)
+                    .resizable(true).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
                         egui::Grid::new("re_g").num_columns(2).spacing([8.0,6.0]).show(ui, |ui| {
@@ -597,8 +600,8 @@ impl ComicInfoApp {
                         });
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            if ui.add(egui::Button::new(RichText::new("  Save  ").color(Color32::WHITE)).fill(theme::ACC)).clicked() { saved = true; }
-                            if ui.add(egui::Button::new(" Cancel ").fill(theme::SURF3)).clicked() { cancelled = true; }
+                            if ui.add(theme::btn_primary("  Save  ")).clicked() { saved = true; }
+                            if ui.add(theme::btn_secondary("  Cancel  ")).clicked() { cancelled = true; }
                         });
                     });
                 if saved {
@@ -613,22 +616,22 @@ impl ComicInfoApp {
                         (RuleTarget::CustomField, None)    => self.cfg.custom_fields.push(vals),
                         (RuleTarget::CustomField, Some(i)) => { if i < self.cfg.custom_fields.len() { self.cfg.custom_fields[i] = vals; } }
                     }
-                } else if open && !cancelled { self.dialog = Some(Dialog::EditRule(s)); }
+                } else if !cancelled { self.dialog = Some(Dialog::EditRule(s)); }
             }
 
             Dialog::Decimal(mut ds) => {
-                let mut open = true; let mut ok = false;
+                let mut ok = false;
                 egui::Window::new("Decimal Chapter")
-                    .open(&mut open).resizable(false).collapsible(false)
+                    .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
-                        ui.label(RichText::new("⚠  Decimal Chapter Detected").color(theme::TWARN).strong().size(13.0));
+                        ui.label(RichText::new("Decimal Chapter Detected").color(theme::TWARN).strong().size(13.0));
                         ui.separator();
                         ui.label(RichText::new(format!("File:  {}", ds.filename)).color(theme::TDIM).size(11.0));
                         ui.label(RichText::new(format!("Title: {}", ds.raw_title)).color(theme::TXT));
                         ui.add_space(6.0);
                         let rt = ds.raw_title.clone();
-                        for (v, lbl) in [(1u8, rt.as_str()), (2,"Bonus Manga"), (3,"Bonus Chapter"), (4,"Extra Chapter"), (5,"Custom →")] {
+                        for (v, lbl) in [(1u8, rt.as_str()), (2,"Bonus Manga"), (3,"Bonus Chapter"), (4,"Extra Chapter"), (5,"Custom ->")] {
                             ui.radio_value(&mut ds.choice, v, lbl);
                         }
                         ui.horizontal(|ui| {
@@ -636,7 +639,7 @@ impl ComicInfoApp {
                             ui.add_enabled(ds.choice==5, egui::TextEdit::singleline(&mut ds.custom).desired_width(180.0));
                         });
                         ui.add_space(6.0);
-                        if ui.add(egui::Button::new(RichText::new("  Confirm  ").color(Color32::WHITE)).fill(theme::ACC)).clicked() { ok = true; }
+                        if ui.add(theme::btn_primary("  Confirm  ")).clicked() { ok = true; }
                     });
                 if ok {
                     let result = match ds.choice {
@@ -648,43 +651,44 @@ impl ComicInfoApp {
                         _ => ds.raw_title.clone(),
                     };
                     if let Some(utx) = &self.ui_tx { let _ = utx.send(UiMsg::DecimalResponse { result }); }
-                } else if open { self.dialog = Some(Dialog::Decimal(ds)); }
+                } else { self.dialog = Some(Dialog::Decimal(ds)); }
             }
 
             Dialog::ResumeSession { cbz_files, processed_set, count } => {
-                let mut open = true; let mut choice = 0i8;
+                let mut choice = 0i8;
                 egui::Window::new("Previous Session Found")
-                    .open(&mut open).resizable(false).collapsible(false)
+                    .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
                     .show(ctx, |ui| {
                         ui.label(format!("{count} files already processed in a previous run."));
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.add(egui::Button::new(RichText::new("▶ Resume").color(Color32::WHITE)).fill(theme::ACC)).clicked() { choice=1; }
+                            if ui.add(theme::btn_primary("Resume")).clicked() { choice=1; }
                             ui.add_space(4.0);
-                            if ui.add(egui::Button::new("Start Fresh").fill(theme::SURF3)).clicked() { choice=2; }
+                            if ui.add(theme::btn_secondary("Start Fresh")).clicked() { choice=2; }
                             ui.add_space(4.0);
                             if ui.add(egui::Button::new("Cancel").fill(theme::SURF3)).clicked() { choice=-1; }
                         });
                     });
                 match choice {
-                    1 => self.check_finale(cbz_files, processed_set, true),
+                    1 => { self.pending_start = Some((cbz_files, processed_set, true)); }
                     2 => {
                         let fname = Path::new(&self.cfg.folder).canonicalize().unwrap_or_default()
                             .file_name().unwrap_or_default().to_string_lossy().to_string();
                         let pf = std::env::current_dir().unwrap_or_default().join("logs").join(format!("{fname}_progress.log"));
                         let _ = std::fs::write(&pf, "");
-                        self.check_finale(cbz_files, HashSet::new(), false);
+                        self.log.push(LogEntry { text: "[Fresh start]".to_string(), level: LogLevel::Dim });
+                        self.pending_start = Some((cbz_files, HashSet::new(), false));
                     }
                     -1 => {}
-                    _  => if open { self.dialog = Some(Dialog::ResumeSession { cbz_files, processed_set, count }); }
+                    _  => { self.dialog = Some(Dialog::ResumeSession { cbz_files, processed_set, count }); }
                 }
             }
 
             Dialog::FinalChapter { cbz_files, processed_set, resume, finale_num, finale_idx } => {
-                let mut open = true; let mut choice = 0i8;
+                let mut choice = 0i8;
                 egui::Window::new("Final Chapter Detected")
-                    .open(&mut open).resizable(false).collapsible(false)
+                    .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
                     .show(ctx, |ui| {
                         ui.label(RichText::new(format!("Chapter {finale_num} is the last chapter.")).strong());
@@ -692,65 +696,59 @@ impl ComicInfoApp {
                         ui.label("Format as  \"Final Chapter: <title>\"?");
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.add(egui::Button::new(RichText::new("Yes — Final Chapter").color(Color32::WHITE)).fill(theme::ACC)).clicked() { choice=1; }
+                            if ui.add(theme::btn_primary("Yes  -  Final Chapter")).clicked() { choice=1; }
                             ui.add_space(4.0);
-                            if ui.add(egui::Button::new("No — Normal").fill(theme::SURF3)).clicked() { choice=2; }
+                            if ui.add(theme::btn_secondary("No  -  Normal")).clicked() { choice=2; }
                         });
                     });
                 if choice != 0 {
                     let mode = if choice==1 { "final" } else { "normal" };
                     self.start_worker(cbz_files, processed_set, resume, Some(finale_idx), Some(finale_num), mode.to_string());
-                } else if open {
+                } else {
                     self.dialog = Some(Dialog::FinalChapter { cbz_files, processed_set, resume, finale_num, finale_idx });
                 }
             }
 
             Dialog::Notice(msg) => {
-                let mut open = true; let mut ok_clicked = false;
-                egui::Window::new("Notice").open(&mut open).resizable(false).collapsible(false)
+                let mut ok_clicked = false;
+                egui::Window::new("Notice").resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
                         ui.label(&msg); ui.add_space(8.0);
-                        if ui.add(egui::Button::new("OK").fill(theme::SURF3)).clicked() { ok_clicked = true; }
+                        if ui.add(theme::btn_secondary("  OK  ")).clicked() { ok_clicked = true; }
                     });
-                if !ok_clicked && open { self.dialog = Some(Dialog::Notice(msg)); }
+                if !ok_clicked { self.dialog = Some(Dialog::Notice(msg)); }
             }
 
             Dialog::ConfirmReset => {
-                let mut open = true; let mut yes = false; let mut cancel = false;
-                egui::Window::new("Confirm Reset").open(&mut open).resizable(false).collapsible(false)
+                let mut yes = false; let mut cancel = false;
+                egui::Window::new("Confirm Reset").resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
                         ui.label("Clear ALL settings, metadata, paths and rules?\nThis cannot be undone.");
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.add(egui::Button::new(RichText::new("Reset All").color(Color32::WHITE)).fill(Color32::from_rgb(0xc0,0x28,0x28))).clicked() { yes=true; }
+                            if ui.add(theme::btn_danger("  Reset All  ")).clicked() { yes=true; }
                             ui.add_space(4.0);
-                            if ui.add(egui::Button::new("Cancel").fill(theme::SURF3)).clicked() { cancel=true; }
+                            if ui.add(theme::btn_secondary("  Cancel  ")).clicked() { cancel=true; }
                         });
                     });
                 if yes { self.reset_all(); }
-                else if open && !cancel { self.dialog = Some(Dialog::ConfirmReset); }
+                else if !cancel { self.dialog = Some(Dialog::ConfirmReset); }
             }
 
             // ── Import result ─────────────────────────────────────────────
             Dialog::ImportResult { filename, items } => {
-                let mut open = true;
                 let mut close = false;
                 egui::Window::new("Import Successful")
-                    .open(&mut open)
                     .resizable(true)
                     .collapsible(false)
                     .min_width(480.0)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
                         // Header
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("✅").size(18.0));
-                            ui.add_space(4.0);
-                            ui.label(
-                                RichText::new(format!("{} field(s) imported from  {filename}", items.len()))
-                                    .color(theme::TGOOD).strong().size(13.0),
-                            );
-                        });
+                        ui.label(
+                            RichText::new(format!("{} field(s) imported from  {filename}", items.len()))
+                                .color(theme::TGOOD).strong().size(13.0),
+                        );
                         ui.separator();
                         ui.add_space(4.0);
 
@@ -773,7 +771,7 @@ impl ComicInfoApp {
                                             );
                                             // Truncate long values (e.g. Summary) for display
                                             let display = if value.len() > 120 {
-                                                format!("{}…", &value[..117])
+                                                format!("{}...", &value[..117])
                                             } else {
                                                 value.clone()
                                             };
@@ -796,13 +794,10 @@ impl ComicInfoApp {
                                 .size(11.0),
                         );
                         ui.add_space(6.0);
-                        if ui.add(
-                            egui::Button::new(RichText::new("  OK  ").color(Color32::WHITE))
-                                .fill(theme::ACC),
-                        ).clicked() { close = true; }
+                        if ui.add(theme::btn_primary("  OK  ")).clicked() { close = true; }
                     });
 
-                if !close && open {
+                if !close {
                     self.dialog = Some(Dialog::ImportResult { filename, items });
                 }
             }
@@ -830,22 +825,30 @@ impl eframe::App for ComicInfoApp {
         if ctx.input(|i| i.viewport().close_requested()) { self.autosave(); }
         if self.last_save.elapsed().as_secs() > 30 { self.autosave(); self.last_save = std::time::Instant::now(); }
 
+        // Process any action deferred from last frame's dialog rendering.
+        // Must run BEFORE rendering so egui never sees stale window layers.
+        if let Some((cbz, ps, resume)) = self.pending_start.take() {
+            self.check_finale(cbz, ps, resume);
+        }
+
         self.handle_shortcuts(ctx);
         self.poll_pick();
         self.poll_worker(ctx);
         self.render_dialogs(ctx);
 
         egui::TopBottomPanel::top("toolbar")
-            .frame(egui::Frame::none().fill(theme::SURF3).inner_margin(egui::Margin::symmetric(8.0, 0.0)))
+            .frame(egui::Frame::none().fill(theme::SURF).stroke(egui::Stroke::new(1.0, theme::BDR)).inner_margin(egui::Margin::symmetric(8.0, 0.0)))
+            .exact_height(44.0)
             .show(ctx, |ui| self.show_toolbar(ui));
         egui::TopBottomPanel::bottom("statusbar")
-            .frame(egui::Frame::none().fill(theme::SURF3).inner_margin(egui::Margin::symmetric(10.0, 4.0)))
+            .frame(egui::Frame::none().fill(theme::BG).stroke(egui::Stroke::new(1.0, theme::BDR)).inner_margin(egui::Margin::symmetric(12.0, 5.0)))
+            .exact_height(26.0)
             .show(ctx, |ui| self.show_statusbar(ui));
         egui::TopBottomPanel::top("tabbar")
-            .frame(egui::Frame::none().fill(theme::BG))
+            .frame(egui::Frame::none().fill(theme::SURF).stroke(egui::Stroke::new(1.0, theme::BDR)))
             .show(ctx, |ui| self.show_tabbar(ui));
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(theme::SURF))
+            .frame(egui::Frame::none().fill(theme::BG))
             .show(ctx, |ui| {
                 match self.tab {
                     Tab::Paths      => self.show_paths(ui),
@@ -865,57 +868,78 @@ impl eframe::App for ComicInfoApp {
 impl ComicInfoApp {
     fn show_toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            ui.add_space(4.0);
-            ui.label(RichText::new("☰  ComicInfo Generator").color(theme::TXT).strong().size(14.0));
+            ui.add_space(8.0);
+            ui.label(RichText::new("ComicInfo Generator")
+                .size(14.0).color(theme::TXT).strong());
+
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("↺  Reset All").color(Color32::WHITE).size(12.0))
-                    .fill(Color32::from_rgb(0x7a,0x20,0x20))).clicked() {
+                ui.add_space(8.0);
+                if ui.add(theme::btn_danger("Reset All")).on_hover_text("Clear all settings (Ctrl+R)").clicked() {
                     self.dialog = Some(Dialog::ConfirmReset);
                 }
-                ui.add_space(4.0);
-                if ui.add(egui::Button::new(RichText::new("📥 Import").size(12.0)).fill(theme::SURF2)).clicked() {
+                ui.add_space(6.0);
+                if ui.add(theme::btn_secondary("Import")).on_hover_text("Import metadata from .py or .json (Ctrl+I)").clicked() {
                     self.start_pick(PathPick::ImportMeta);
                 }
                 ui.add_space(4.0);
-                if ui.add(egui::Button::new(RichText::new("📂 Load Config").size(12.0)).fill(theme::SURF2)).clicked() {
+                if ui.add(theme::btn_secondary("Load")).on_hover_text("Load a config file (Ctrl+O)").clicked() {
                     self.start_pick(PathPick::LoadConfig);
                 }
                 ui.add_space(4.0);
-                if ui.add(egui::Button::new(RichText::new("💾 Save Config").size(12.0)).fill(theme::SURF2)).clicked() {
-                    let n = self.smart_filename(); self.start_pick(PathPick::SaveConfig(n));
+                if ui.add(theme::btn_secondary("Save")).on_hover_text("Save config file (Ctrl+S)").clicked() {
+                    let n = self.smart_filename();
+                    self.start_pick(PathPick::SaveConfig(n));
                 }
-                ui.add_space(12.0);
-                ui.label(RichText::new("Ctrl+S / O / I / R").color(theme::TDIM).size(10.0));
+                ui.add_space(20.0);
+                ui.label(RichText::new("Ctrl+S / O / I / R").color(theme::TMUT).size(10.0));
             });
         });
     }
 
     fn show_statusbar(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            // Status dot — drawn as a vector circle (never depends on font glyph coverage)
+            let dot_col = if self.running { theme::TGOOD }
+                          else if self.status.contains("error") || self.status.contains("Error") { theme::TERR }
+                          else { theme::TMUT };
+            let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+            ui.painter().circle_filled(dot_rect.center(), 3.5, dot_col);
+            ui.add_space(6.0);
             ui.label(RichText::new(&self.status).color(theme::TDIM).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new("ComicInfo Generator — Rust Edition").color(theme::TDIM).size(11.0));
+                ui.label(RichText::new("ComicInfo Generator  -  Rust Edition")
+                    .color(theme::TMUT).size(10.0));
             });
         });
     }
 
     fn show_tabbar(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.style_mut().spacing.item_spacing.x = 0.0;
+            ui.add_space(14.0);
+            ui.style_mut().spacing.item_spacing.x = 6.0;
             for (tab, label) in [
-                (Tab::Paths,      "  📁  Paths  "),
-                (Tab::Processing, "  ⚙  Processing  "),
-                (Tab::Metadata,   "  📝  Metadata  "),
-                (Tab::Rules,      "  📋  Rules  "),
-                (Tab::Run,        "  ▶  Run  "),
+                (Tab::Paths,      "Paths"),
+                (Tab::Processing, "Processing"),
+                (Tab::Metadata,   "Metadata"),
+                (Tab::Rules,      "Rules"),
+                (Tab::Run,        "Run"),
             ] {
                 let active = self.tab == tab;
-                if ui.add(egui::Button::new(RichText::new(label)
-                    .color(if active { theme::TXT } else { theme::TDIM }).size(12.0))
-                    .fill(if active { theme::SURF } else { theme::SURF2 })
-                    .rounding(egui::Rounding::ZERO)).clicked() { self.tab = tab; }
+                if ui.add(
+                    egui::Button::new(
+                        RichText::new(label).size(12.0)
+                            .color(if active { Color32::WHITE } else { theme::TDIM })
+                    )
+                    .fill(if active { theme::ACC } else { Color32::TRANSPARENT })
+                    .stroke(egui::Stroke::new(1.0,
+                        if active { theme::ACC } else { theme::BDR }))
+                    .rounding(egui::Rounding::same(18.0))
+                    .min_size(egui::vec2(0.0, 28.0))
+                ).clicked() { self.tab = tab; }
             }
         });
+        ui.add_space(6.0);
     }
 }
 
@@ -923,34 +947,29 @@ impl ComicInfoApp {
 //  Helper widgets (static)
 // ═══════════════════════════════════════════════════════════════════════════════
 impl ComicInfoApp {
-    fn section_hdr(ui: &mut egui::Ui, title: &str) {
-        ui.add_space(2.0);
-        ui.label(RichText::new(title).color(theme::ACC2).strong().size(12.0));
-        ui.separator(); ui.add_space(2.0);
-    }
+
 
     fn path_row(ui: &mut egui::Ui, label: &str, val: &mut String, tip: &str) -> bool {
         let mut clicked = false;
+        ui.add_space(2.0);
         ui.horizontal(|ui| {
-            // Fixed-width label so all fields align
-            ui.add_sized([148.0, 22.0], egui::Label::new(
-                RichText::new(label).color(theme::TXT).size(12.0)
+            ui.add_sized([152.0, 26.0], egui::Label::new(
+                RichText::new(label).color(theme::TDIM).size(12.0)
             ));
-            // Right-to-left: [Browse] then text-field filling the rest
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(
-                    egui::Button::new("Browse").fill(theme::SURF3)
-                        .min_size(egui::vec2(72.0, 22.0))
+                    egui::Button::new(RichText::new("Browse").size(11.5).color(theme::TXT))
+                        .fill(theme::SURF3)
+                        .stroke(egui::Stroke::new(1.0, theme::BDR))
+                        .rounding(egui::Rounding::same(5.0))
+                        .min_size(egui::vec2(74.0, 26.0))
                 ).clicked() { clicked = true; }
-
                 let resp = ui.add(
                     egui::TextEdit::singleline(val)
                         .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
-                        .hint_text("Type a path or click Browse…")
+                        .hint_text("Browse or type a path...")
                         .desired_width(f32::INFINITY)
                 ).on_hover_text(tip);
-
-                // Auto-strip surrounding double-quotes when pasting from Explorer
                 if resp.changed() && val.starts_with('"') && val.ends_with('"') && val.len() > 2 {
                     *val = val[1..val.len()-1].to_string();
                 }
@@ -974,13 +993,13 @@ impl ComicInfoApp {
         // Header
         let hdr_h = 24.0;
         let (hr, _) = ui.allocate_exact_size(egui::vec2(ui.available_width().max(total_w), hdr_h), egui::Sense::hover());
-        ui.painter().rect_filled(hr, egui::Rounding::ZERO, theme::SURF3);
+        ui.painter().rect_filled(hr, egui::Rounding::same(4.0), theme::SURF3);
         let mut cx = hr.left() + 6.0;
         for (name, w) in cols {
             ui.painter().text(
                 egui::pos2(cx, hr.center().y),
                 egui::Align2::LEFT_CENTER, *name,
-                egui::FontId::new(11.0, egui::FontFamily::Proportional), theme::ACC2,
+                egui::FontId::new(11.5, egui::FontFamily::Proportional), theme::ACC2,
             );
             cx += w;
         }
@@ -1004,10 +1023,10 @@ impl ComicInfoApp {
                         let mut cx = rect.left() + 6.0;
                         for (j, (_, w)) in cols.iter().enumerate() {
                             let txt = row.get(j).map(|s| s.as_str()).unwrap_or("");
-                            // Clip text to column width using a clipping Painter
+                            // Clip text to column — rect must have positive dims or egui panics
                             let clip = egui::Rect::from_min_size(
                                 egui::pos2(cx, rect.top()),
-                                egui::vec2(w - 4.0, row_h),
+                                egui::vec2((w - 4.0).max(1.0), row_h.max(1.0)),
                             );
                             ui.painter().with_clip_rect(clip).text(
                                 egui::pos2(cx, rect.center().y),
@@ -1037,11 +1056,11 @@ impl ComicInfoApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).color(theme::ACC2).strong().size(12.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("－ Remove").size(11.0)).fill(theme::SURF3)).clicked() {
+                if ui.add(egui::Button::new(RichText::new("Remove").size(11.0).color(theme::TERR)).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR)).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
                     if let Some(idx) = *sel { if idx < rows.len() { rows.remove(idx); } *sel = None; }
                 }
                 ui.add_space(2.0);
-                if ui.add(egui::Button::new(RichText::new("✏ Edit").size(11.0)).fill(theme::SURF3)).clicked() {
+                if ui.add(egui::Button::new(RichText::new("Edit").size(11.0).color(theme::ACC2)).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR)).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
                     if let Some(idx) = *sel {
                         if let Some(row) = rows.get(idx) {
                             pending = Some(Dialog::EditRule(RuleEditState {
@@ -1053,7 +1072,7 @@ impl ComicInfoApp {
                     }
                 }
                 ui.add_space(2.0);
-                if ui.add(egui::Button::new(RichText::new("＋ Add").size(11.0)).fill(theme::SURF3)).clicked() {
+                if ui.add(egui::Button::new(RichText::new("Add").size(11.0).color(theme::TGOOD)).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR)).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
                     pending = Some(Dialog::EditRule(RuleEditState {
                         target, row_idx: None, is_new: true,
                         labels: cols.iter().map(|(h,_)| h.to_string()).collect(),
@@ -1090,44 +1109,44 @@ fn padded(row: &[String], n: usize) -> Vec<String> {
 impl ComicInfoApp {
     fn show_paths(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().id_salt("paths_scr").show(ui, |ui| {
-            ui.add_space(16.0);
-            ui.horizontal(|ui| { ui.add_space(20.0); ui.vertical(|ui| {
+            ui.add_space(20.0);
+            ui.horizontal(|ui| { ui.add_space(24.0); ui.vertical(|ui| {
 
-            theme::section_frame().show(ui, |ui| {
-                Self::section_hdr(ui, "File Paths");
-                ui.add_space(2.0);
+            theme::card().show(ui, |ui| {
+                theme::section_hdr(ui, "File Paths");
                 if Self::path_row(ui, "CBZ Folder:", &mut self.cfg.folder, "Folder containing the .cbz files.") {
                     self.start_pick(PathPick::Folder);
                 }
-                ui.add_space(2.0);
                 if Self::path_row(ui, "Chapter Titles JSON:", &mut self.cfg.ch_json, r#"{"1":"Title","2":"..."}"#) {
                     self.start_pick(PathPick::ChJson);
                 }
-                ui.add_space(2.0);
                 if Self::path_row(ui, "Volume Titles JSON:", &mut self.cfg.vol_json, r#"{"1":"Vol 1 Title"}"#) {
                     self.start_pick(PathPick::VolJson);
                 }
-                ui.add_space(2.0);
                 if Self::path_row(ui, "Episode Dates JSON:", &mut self.cfg.date_json, r#"{"1":"Jul 25, 2019"}"#) {
                     self.start_pick(PathPick::DateJson);
                 }
             });
-            ui.add_space(12.0);
-            theme::section_frame().show(ui, |ui| {
-                Self::section_hdr(ui, "Processing Settings");
+            ui.add_space(14.0);
+
+            theme::card().show(ui, |ui| {
+                theme::section_hdr(ui, "Processing Settings");
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Max Workers:").color(theme::TXT).size(12.0));
-                    ui.add(egui::DragValue::new(&mut self.cfg.workers).range(1..=32).speed(0.1));
-                    ui.add_space(20.0);
+                    ui.label(RichText::new("Max Workers:").color(theme::TDIM).size(12.0));
+                    ui.add_space(4.0);
+                    ui.add(egui::DragValue::new(&mut self.cfg.workers)
+                        .range(1..=32).speed(0.1));
+                    ui.add_space(28.0);
                     ui.checkbox(&mut self.cfg.dry_run,
-                        RichText::new("Dry Run  (preview — no files modified)").size(12.0));
+                        RichText::new("Dry Run  -  preview only, no files modified").size(12.0));
                 });
-                ui.add_space(4.0);
-                ui.label(RichText::new(format!("Log dir: {}", std::env::current_dir().unwrap_or_default().join("logs").display()))
-                    .color(theme::TDIM).size(11.0));
+                ui.add_space(6.0);
+                let log_path = std::env::current_dir().unwrap_or_default().join("logs");
+                ui.label(RichText::new(format!("Log directory: {}", log_path.display()))
+                    .color(theme::TMUT).size(11.0));
             });
 
-            }); }); // end horizontal/vertical
+            }); }); // horizontal/vertical
         });
     }
 
@@ -1138,13 +1157,15 @@ impl ComicInfoApp {
                 let lc = &mut cols[0];
                 egui::Frame::none().outer_margin(egui::Margin { left:20.0, right:8.0, ..Default::default() }).show(lc, |ui| {
                     // Mode
-                    theme::section_frame().show(ui, |ui| {
-                        Self::section_hdr(ui, "Mode");
+                    theme::card().show(ui, |ui| {
+                        theme::section_hdr(ui, "Mode");
                         ui.horizontal(|ui| {
                             let was = self.cfg.mode.clone();
-                            ui.radio_value(&mut self.cfg.mode, ComicMode::Manga,  "Manga");
+                            ui.radio_value(&mut self.cfg.mode, ComicMode::Manga, "Manga")
+                                .on_hover_text("Turns ON all Volume Metadata options (default for most manga).");
                             ui.add_space(8.0);
-                            ui.radio_value(&mut self.cfg.mode, ComicMode::Manhwa, "Manhwa / Manhua");
+                            ui.radio_value(&mut self.cfg.mode, ComicMode::Manhwa, "Manhwa / Manhua")
+                                .on_hover_text("Turns OFF all Volume Metadata options (no volumes in manhwa).");
                             if self.cfg.mode != was {
                                 let is_m = matches!(self.cfg.mode, ComicMode::Manga);
                                 self.cfg.use_vol = is_m; self.cfg.use_vol_date = is_m; self.cfg.use_vol_summ = is_m;
@@ -1153,16 +1174,19 @@ impl ComicInfoApp {
                     });
                     ui.add_space(10.0);
                     // Volume metadata
-                    theme::section_frame().show(ui, |ui| {
-                        Self::section_hdr(ui, "Volume Metadata");
-                        ui.checkbox(&mut self.cfg.use_vol,      RichText::new("Include volume number").size(12.0));
-                        ui.checkbox(&mut self.cfg.use_vol_date, RichText::new("Use volume date rules").size(12.0));
-                        ui.checkbox(&mut self.cfg.use_vol_summ, RichText::new("Use per-volume summaries").size(12.0));
+                    theme::card().show(ui, |ui| {
+                        theme::section_hdr(ui, "Volume Metadata");
+                        ui.checkbox(&mut self.cfg.use_vol, RichText::new("Include volume number in metadata").size(12.0))
+                            .on_hover_text("Enables Volume field in ComicInfo.xml. Disable for manhwa.");
+                        ui.checkbox(&mut self.cfg.use_vol_date, RichText::new("Use volume date rules for publication").size(12.0))
+                            .on_hover_text("Overrides Year/Month/Day from Date Rules table. Disable for manhwa.");
+                        ui.checkbox(&mut self.cfg.use_vol_summ, RichText::new("Use per-volume summary rules").size(12.0))
+                            .on_hover_text("Overrides Summary from Summary Rules table. Disable for manhwa.");
                     });
                     ui.add_space(10.0);
                     // Post-finale
-                    theme::section_frame().show(ui, |ui| {
-                        Self::section_hdr(ui, "Post-Finale Behaviour");
+                    theme::card().show(ui, |ui| {
+                        theme::section_hdr(ui, "Post-Finale Behaviour");
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("After finale:").color(theme::TXT).size(12.0));
                             egui::ComboBox::from_id_salt("pf")
@@ -1170,14 +1194,16 @@ impl ComicInfoApp {
                                 .show_ui(ui, |ui| {
                                     ui.selectable_value(&mut self.cfg.post_finale, PostFinale::Strip, "strip");
                                     ui.selectable_value(&mut self.cfg.post_finale, PostFinale::Keep,  "keep");
-                                });
+                                })
+                                .response
+                                .on_hover_text("\"strip\" removes the prefix from post-finale chapters.\n\"keep\" preserves it.");
                         });
                     });
                     ui.add_space(10.0);
                     // Zero-pad
-                    theme::section_frame().show(ui, |ui| {
-                        Self::section_hdr(ui, "Zero-Padding");
-                        ui.checkbox(&mut self.cfg.zero_pad, RichText::new("Zero-pad numbers  (e.g. 01, 02 …)").size(12.0));
+                    theme::card().show(ui, |ui| {
+                        theme::section_hdr(ui, "Zero-Padding");
+                        ui.checkbox(&mut self.cfg.zero_pad, RichText::new("Zero-pad numbers  (e.g. 01, 02 ...)").size(12.0));
                         ui.horizontal(|ui| {
                             ui.add_space(20.0);
                             ui.add_enabled(self.cfg.zero_pad, egui::Label::new(RichText::new("Width:").color(theme::TXT).size(12.0)));
@@ -1189,14 +1215,14 @@ impl ComicInfoApp {
                 let rc = &mut cols[1];
                 egui::Frame::none().outer_margin(egui::Margin { left:8.0, right:20.0, ..Default::default() }).show(rc, |ui| {
                     // Prefix mode
-                    theme::section_frame().show(ui, |ui| {
-                        Self::section_hdr(ui, "Number Prefix");
+                    theme::card().show(ui, |ui| {
+                        theme::section_hdr(ui, "Number Prefix");
                         for (val, lbl) in [
                             (PrefixMode::Auto,    "Auto-detect from filename"),
                             (PrefixMode::Episode, "Always: Episode"),
                             (PrefixMode::Chapter, "Always: Chapter"),
                             (PrefixMode::Volume,  "Always: Volume"),
-                            (PrefixMode::Custom,  "Custom →"),
+                            (PrefixMode::Custom,  "Custom:"),
                         ] {
                             if ui.radio_value(&mut self.cfg.prefix_mode, val, lbl).changed() {
                                 self.rebuild_sep_preview();
@@ -1208,23 +1234,26 @@ impl ComicInfoApp {
                             let r = ui.add_enabled(
                                 matches!(self.cfg.prefix_mode, PrefixMode::Custom),
                                 egui::TextEdit::singleline(&mut self.cfg.custom_pfx).desired_width(120.0),
-                            );
+                            ).on_hover_text("Used when prefix mode is \"custom\". E.g. \"Break\".");
                             if r.changed() { self.rebuild_sep_preview(); }
                         });
                     });
                     ui.add_space(10.0);
                     // Separator
-                    theme::section_frame().show(ui, |ui| {
-                        Self::section_hdr(ui, "Title Separator");
+                    theme::card().show(ui, |ui| {
+                        theme::section_hdr(ui, "Title Separator");
                         if ui.checkbox(&mut self.cfg.csep_on,
-                            RichText::new("Override separator").size(12.0)).changed() {
+                            RichText::new("Override separator").size(12.0))
+                            .on_hover_text("Replaces the default ' - ' or ': ' between number and title.")
+                            .changed() {
                             self.rebuild_sep_preview();
                         }
                         ui.horizontal(|ui| {
                             ui.add_space(20.0);
                             ui.label(RichText::new("Separator:").color(theme::TXT).size(12.0));
                             let r = ui.add_enabled(self.cfg.csep_on,
-                                egui::TextEdit::singleline(&mut self.cfg.csep).desired_width(80.0));
+                                egui::TextEdit::singleline(&mut self.cfg.csep).desired_width(80.0))
+                                .on_hover_text("e.g. \"-\" or \"~\"   (avoid  / \\ : * ? \" < > |  - invalid in filenames)");
                             if r.changed() { self.rebuild_sep_preview(); }
                         });
                         ui.add_space(4.0);
@@ -1247,8 +1276,8 @@ impl ComicInfoApp {
             ui.add_space(16.0);
             ui.horizontal(|ui| { ui.add_space(20.0); ui.vertical(|ui| {
 
-            theme::section_frame().show(ui, |ui| {
-                Self::section_hdr(ui, "Constant Metadata  (applied to every CBZ)");
+            theme::card().show(ui, |ui| {
+                theme::section_hdr(ui, "Constant Metadata  (applied to every CBZ)");
                 // Split into two equal columns; each has its own label+field grid
                 // so field widths are independent of label text length.
                 let lbl = |t: &str| RichText::new(t).color(theme::TXT).size(12.0);
@@ -1264,44 +1293,57 @@ impl ComicInfoApp {
                     egui::Grid::new("mgl").num_columns(2).spacing([8.0,6.0])
                         .min_col_width(0.0).show(&mut cols[0], |ui| {
                             ui.label(lbl("Series:"));
-                            ui.add(egui::TextEdit::singleline(s).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(s).desired_width(f32::INFINITY))
+                                .on_hover_text("Comic series title."); ui.end_row();
                             ui.label(lbl("Penciller:"));
-                            ui.add(egui::TextEdit::singleline(pe).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(pe).desired_width(f32::INFINITY))
+                                .on_hover_text("Penciller / illustrator."); ui.end_row();
                             ui.label(lbl("Language ISO:"));
-                            ui.add(egui::TextEdit::singleline(l).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(l).desired_width(f32::INFINITY))
+                                .on_hover_text("ISO code: \"en\", \"ja\", \"ko\" ..."); ui.end_row();
                             ui.label(lbl("Genre:"));
-                            ui.add(egui::TextEdit::singleline(g).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(g).desired_width(f32::INFINITY))
+                                .on_hover_text("Genres, comma-separated."); ui.end_row();
                             ui.label(lbl("Year:"));
-                            ui.add(egui::TextEdit::singleline(y).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(y).desired_width(f32::INFINITY))
+                                .on_hover_text("Default publication year."); ui.end_row();
                             ui.label(lbl("Day:"));
-                            ui.add(egui::TextEdit::singleline(d).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(d).desired_width(f32::INFINITY))
+                                .on_hover_text("Default publication day."); ui.end_row();
                         });
                     egui::Grid::new("mgr").num_columns(2).spacing([8.0,6.0])
                         .min_col_width(0.0).show(&mut cols[1], |ui| {
                             ui.label(lbl("Writer:"));
-                            ui.add(egui::TextEdit::singleline(w).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(w).desired_width(f32::INFINITY))
+                                .on_hover_text("Script writer / author."); ui.end_row();
                             ui.label(lbl("Publisher:"));
-                            ui.add(egui::TextEdit::singleline(pu).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(pu).desired_width(f32::INFINITY))
+                                .on_hover_text("Publisher names, comma-separated."); ui.end_row();
                             ui.label(lbl("Alt. Series:"));
-                            ui.add(egui::TextEdit::singleline(al).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(al).desired_width(f32::INFINITY))
+                                .on_hover_text("Original / alternate series title."); ui.end_row();
                             ui.label(lbl("Rating:"));
-                            ui.add(egui::TextEdit::singleline(r).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(r).desired_width(f32::INFINITY))
+                                .on_hover_text("Score, e.g. 7.7"); ui.end_row();
                             ui.label(lbl("Month:"));
-                            ui.add(egui::TextEdit::singleline(mo).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(mo).desired_width(f32::INFINITY))
+                                .on_hover_text("Default publication month."); ui.end_row();
                             ui.label(lbl("Count:"));
-                            ui.add(egui::TextEdit::singleline(c).desired_width(f32::INFINITY)); ui.end_row();
+                            ui.add(egui::TextEdit::singleline(c).desired_width(f32::INFINITY))
+                                .on_hover_text("Total chapter / volume count."); ui.end_row();
                         });
                 });
                 // Web — full width below both columns
                 ui.horizontal(|ui| {
                     ui.label(lbl("Web:"));
                     ui.add(egui::TextEdit::singleline(&mut self.cfg.web)
-                        .desired_width(f32::INFINITY));
+                        .desired_width(f32::INFINITY))
+                        .on_hover_text("Space-separated URLs for the series.");
                 });
             });
             ui.add_space(10.0);
 
-            theme::section_frame().show(ui, |ui| {
+            theme::card().show(ui, |ui| {
                 if let Some(dlg) = Self::rule_section(
                     ui, "Custom XML Fields", "cf",
                     &[("Field Name", 200.0), ("Value", 500.0)],
@@ -1311,8 +1353,8 @@ impl ComicInfoApp {
             });
             ui.add_space(10.0);
 
-            theme::section_frame().show(ui, |ui| {
-                Self::section_hdr(ui, "Default Summary  (Chapter 1 + fallback)");
+            theme::card().show(ui, |ui| {
+                theme::section_hdr(ui, "Default Summary  (Chapter 1 + fallback)");
                 ui.add(egui::TextEdit::multiline(&mut self.cfg.summary)
                     .desired_rows(6).desired_width(f32::INFINITY)
                     .font(egui::FontId::new(12.0, egui::FontFamily::Monospace)));
@@ -1332,25 +1374,25 @@ impl ComicInfoApp {
         ui.add_space(8.0);
         ui.horizontal(|ui| { ui.add_space(18.0); ui.vertical(|ui| {
 
-        theme::section_frame().show(ui, |ui| {
+        theme::card().show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
-                ui, "Volume Rules  —  Chapter range → Volume number", "vr",
+                ui, "Volume Rules   -   Chapter range -> Volume number", "vr",
                 &[("Ch Start", 110.0),("Ch End", 110.0),("Volume", 110.0)],
                 &mut self.cfg.volume_rules, &mut self.vol_sel, table_h, RuleTarget::Volume,
             ) { self.dialog = Some(dlg); }
         });
         ui.add_space(10.0);
-        theme::section_frame().show(ui, |ui| {
+        theme::card().show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
-                ui, "Date Rules  —  Volume range → Publication Date", "dr",
+                ui, "Date Rules   -   Volume range -> Publication Date", "dr",
                 &[("Vol Start",90.0),("Vol End",90.0),("Year",70.0),("Month",70.0),("Day",70.0)],
                 &mut self.cfg.date_rules, &mut self.date_sel, table_h, RuleTarget::Date,
             ) { self.dialog = Some(dlg); }
         });
         ui.add_space(10.0);
-        theme::section_frame().show(ui, |ui| {
+        theme::card().show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
-                ui, "Summary Rules  —  Volume range → Custom Summary", "sr",
+                ui, "Summary Rules   -   Volume range -> Custom Summary", "sr",
                 &[("Vol Start",90.0),("Vol End",90.0),("Summary",560.0)],
                 &mut self.cfg.summ_rules, &mut self.summ_sel, table_h, RuleTarget::Summary,
             ) { self.dialog = Some(dlg); }
@@ -1360,76 +1402,115 @@ impl ComicInfoApp {
     }
 
     fn show_run(&mut self, ui: &mut egui::Ui) {
-        // Control bar
-        egui::Frame::none().fill(theme::SURF2).inner_margin(egui::Margin::symmetric(14.0, 8.0)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                if ui.add_enabled(!self.running,
-                    egui::Button::new(RichText::new("  ▶  Start Processing  ").color(Color32::WHITE).size(13.0)).fill(theme::ACC)
-                ).clicked() { self.on_start(); }
-                ui.add_space(6.0);
-                if ui.add_enabled(self.running,
-                    egui::Button::new(RichText::new("  ⏹  Stop  ").color(Color32::WHITE).size(13.0))
-                        .fill(Color32::from_rgb(0x8b,0x22,0x22))
-                ).clicked() {
-                    use std::sync::atomic::Ordering;
-                    self.stop_flag.store(true, Ordering::Relaxed);
-                    self.status = "Stopping…".to_string();
-                }
-                ui.add_space(16.0);
-                if self.cfg.dry_run {
-                    ui.label(RichText::new("⚠  DRY RUN — no files will be modified").color(theme::TWARN).strong().size(12.0));
-                }
-            });
-        });
-        ui.add_space(6.0);
+        // ── Control bar ──────────────────────────────────────────────────────
+        egui::Frame::none()
+            .fill(theme::SURF)
+            .stroke(egui::Stroke::new(1.0, theme::BDR))
+            .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    // Start
+                    let start_btn = ui.add_enabled(
+                        !self.running,
+                        egui::Button::new(
+                            RichText::new("  Start Processing  ")
+                                .color(Color32::WHITE).size(13.0).strong()
+                        )
+                        .fill(Color32::from_rgb(0x16, 0x9a, 0x3c))
+                        .rounding(egui::Rounding::same(8.0))
+                        .min_size(egui::vec2(0.0, 36.0)),
+                    );
+                    if start_btn.clicked() { self.on_start(); }
 
-        // Progress
-        egui::Frame::none().inner_margin(egui::Margin::symmetric(16.0, 0.0)).show(ui, |ui| {
-            let (done, total) = self.progress;
-            let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(format!("{done} / {total} files")).color(theme::TXT).size(12.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{}%", (frac * 100.0) as u32)).color(theme::ACC2).strong().size(13.0));
-                });
-            });
-            ui.add(egui::ProgressBar::new(frac).animate(self.running).desired_width(f32::INFINITY));
-        });
-        ui.add_space(4.0);
+                    ui.add_space(8.0);
 
-        // Log header
-        egui::Frame::none().fill(theme::SURF2).inner_margin(egui::Margin::symmetric(14.0, 4.0)).show(ui, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Log Output").color(theme::ACC2).strong().size(12.0));
-                ui.add_space(12.0);
-                ui.checkbox(&mut self.verbose, RichText::new("Verbose").size(12.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.add(egui::Button::new(RichText::new("🗑 Clear").size(11.0)).fill(theme::SURF3)).clicked() {
-                        self.log.clear();
+                    // Stop
+                    let stop_col = Color32::from_rgb(0xf8, 0x71, 0x71);
+                    let stop_btn = ui.add_enabled(
+                        self.running,
+                        egui::Button::new(
+                            RichText::new("  Stop  ").color(stop_col).size(13.0)
+                        )
+                        .fill(Color32::from_rgba_unmultiplied(0xf8, 0x71, 0x71, 18))
+                        .stroke(egui::Stroke::new(1.5, stop_col))
+                        .rounding(egui::Rounding::same(8.0))
+                        .min_size(egui::vec2(0.0, 36.0)),
+                    );
+                    if stop_btn.clicked() {
+                        use std::sync::atomic::Ordering;
+                        self.stop_flag.store(true, Ordering::Relaxed);
+                        self.status = "Stopping after current file...".to_string();
+                    }
+
+                    ui.add_space(16.0);
+
+                    // Status indicators
+                    if self.running {
+                        ui.label(RichText::new("Processing...").color(theme::TGOOD).size(12.0));
+                    }
+                    if self.cfg.dry_run {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new("DRY RUN -- files will NOT be modified")
+                            .color(theme::TWARN).size(12.0).strong());
+                    }
+
+                    // Progress fraction right-aligned
+                    let (done, total) = self.progress;
+                    if total > 0 {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.add_space(4.0);
+                            let pct = done as f32 / total as f32;
+                            ui.label(RichText::new(format!("{done} / {total}"))
+                                .color(theme::TDIM).size(11.0));
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(format!("{}%", (pct * 100.0) as u32))
+                                .color(theme::ACC2).strong().size(14.0));
+                        });
                     }
                 });
             });
-        });
 
-        // Log
-        // Reserve space: stats cards ~68px, header ~32px already shown above
-        let log_h = (ui.available_height() - 80.0).max(60.0);
-        egui::Frame::none().fill(theme::BG).inner_margin(egui::Margin::symmetric(12.0, 6.0)).show(ui, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("log_scr").max_height(log_h)
-                .auto_shrink([false,false]).stick_to_bottom(true)
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    for entry in &self.log {
-                        ui.add(egui::Label::new(
-                            RichText::new(&entry.text).color(entry.level.color())
-                                .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
-                        ).wrap_mode(egui::TextWrapMode::Extend));
-                    }
+        // ── Progress bar ─────────────────────────────────────────────────────
+        let (done, total) = self.progress;
+        let frac = if total > 0 { done as f32 / total as f32 } else { 0.0 };
+        egui::Frame::none()
+            .fill(theme::BDR)
+            .inner_margin(egui::Margin::ZERO)
+            .show(ui, |ui| {
+                let bar_w = (ui.available_width() * frac).max(if self.running { 4.0 } else { 0.0 });
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(ui.available_width(), 4.0), egui::Sense::hover()
+                );
+                ui.painter().rect_filled(rect, egui::Rounding::ZERO, theme::BDR);
+                if bar_w > 0.0 {
+                    let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(bar_w, 4.0));
+                    let col = if frac >= 1.0 { theme::TGOOD } else { theme::ACC };
+                    ui.painter().rect_filled(fill_rect, egui::Rounding::ZERO, col);
+                }
+            });
+
+        // ── Log header ────────────────────────────────────────────────────────
+        egui::Frame::none()
+            .fill(theme::SURF2)
+            .stroke(egui::Stroke::new(1.0, theme::BDR))
+            .inner_margin(egui::Margin::symmetric(14.0, 6.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Log Output").color(theme::ACC2).strong().size(12.0));
+                    ui.add_space(8.0);
+                    ui.checkbox(&mut self.verbose, RichText::new("Verbose").color(theme::TDIM).size(11.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(
+                            egui::Button::new(RichText::new("Clear").size(11.0).color(theme::TDIM))
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::new(1.0, theme::BDR))
+                                .rounding(egui::Rounding::same(4.0))
+                        ).clicked() { self.log.clear(); }
+                    });
                 });
-        });
+            });
 
-        // Stats — card-based layout: snapshot fields before any closure
+        // ── Stats snapshot (before closures) ─────────────────────────────────
         let st = [
             ("Total",       self.disp_stats.total,     false),
             ("Processed",   self.disp_stats.processed, false),
@@ -1438,37 +1519,55 @@ impl ComicInfoApp {
             ("XML Updated", self.disp_stats.xml,       false),
             ("Errors",      self.disp_stats.errors,    self.disp_stats.errors > 0),
         ];
+        let stats_h = 62.0;
+        let log_h   = (ui.available_height() - stats_h).max(60.0);
+
+        // ── Log output ────────────────────────────────────────────────────────
         egui::Frame::none()
-            .fill(theme::SURF2)
-            .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+            .fill(theme::BG)
+            .inner_margin(egui::Margin::symmetric(14.0, 8.0))
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("log_scr")
+                    .max_height(log_h)
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        for entry in &self.log {
+                            ui.add(egui::Label::new(
+                                RichText::new(&entry.text)
+                                    .color(entry.level.color())
+                                    .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
+                            ).wrap_mode(egui::TextWrapMode::Extend));
+                        }
+                    });
+            });
+
+        // ── Stats bar ─────────────────────────────────────────────────────────
+        egui::Frame::none()
+            .fill(theme::SURF)
+            .stroke(egui::Stroke::new(1.0, theme::BDR))
+            .inner_margin(egui::Margin::symmetric(16.0, 8.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.style_mut().spacing.item_spacing = egui::vec2(8.0, 0.0);
+                    ui.style_mut().spacing.item_spacing.x = 0.0;
                     for &(lbl, val, is_err) in &st {
-                        egui::Frame::none()
-                            .fill(theme::SURF3)
-                            .rounding(egui::Rounding::same(6.0))
-                            .inner_margin(egui::Margin::symmetric(16.0, 8.0))
-                            .show(ui, |ui| {
-                                ui.set_min_width(72.0);
-                                // Number (top, large)
-                                let num_col = if is_err {
-                                    theme::TERR
-                                } else if val > 0 {
-                                    theme::TGOOD
-                                } else {
-                                    theme::TDIM
-                                };
-                                ui.centered_and_justified(|ui| {
-                                    ui.label(RichText::new(val.to_string())
-                                        .color(num_col).strong().size(22.0));
-                                });
-                                // Label (bottom, small)
-                                ui.centered_and_justified(|ui| {
-                                    ui.label(RichText::new(lbl)
-                                        .color(theme::TDIM).size(10.0));
-                                });
-                            });
+                        let num_col = if is_err { theme::TERR }
+                                      else if val > 0 { theme::TGOOD }
+                                      else { theme::TMUT };
+                        ui.vertical(|ui| {
+                            ui.set_min_width(100.0);
+                            ui.label(RichText::new(val.to_string())
+                                .color(num_col).strong().size(18.0));
+                            ui.label(RichText::new(lbl).color(theme::TMUT).size(10.0));
+                        });
+                        // Divider
+                        let (vl, _) = ui.allocate_exact_size(
+                            egui::vec2(1.0, 36.0), egui::Sense::hover()
+                        );
+                        ui.painter().rect_filled(vl, egui::Rounding::ZERO, theme::BDR);
+                        ui.add_space(20.0);
                     }
                 });
             });
