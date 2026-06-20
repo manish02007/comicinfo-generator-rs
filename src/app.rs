@@ -1408,13 +1408,15 @@ impl ComicInfoApp {
         egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(20.0, 0.0))
             .show(ui, |ui| {
+        ui.add_space(10.0);
         // ── Control bar ──────────────────────────────────────────────────────
         egui::Frame::none()
             .fill(theme::SURF)
             .stroke(egui::Stroke::new(1.0, theme::BDR))
-            .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+            .rounding(egui::Rounding::same(8.0))
+            .inner_margin(egui::Margin::symmetric(16.0, 6.0))
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 0.0), egui::Sense::hover());
                 ui.horizontal(|ui| {
                     // Start
                     let start_btn = ui.add_enabled(
@@ -1425,7 +1427,7 @@ impl ComicInfoApp {
                         )
                         .fill(Color32::from_rgb(0x16, 0x9a, 0x3c))
                         .rounding(egui::Rounding::same(8.0))
-                        .min_size(egui::vec2(0.0, 36.0)),
+                        .min_size(egui::vec2(0.0, 32.0)),
                     );
                     if start_btn.clicked() { self.on_start(); }
 
@@ -1441,7 +1443,7 @@ impl ComicInfoApp {
                         .fill(Color32::from_rgba_unmultiplied(0xf8, 0x71, 0x71, 18))
                         .stroke(egui::Stroke::new(1.5, stop_col))
                         .rounding(egui::Rounding::same(8.0))
-                        .min_size(egui::vec2(0.0, 36.0)),
+                        .min_size(egui::vec2(0.0, 32.0)),
                     );
                     if stop_btn.clicked() {
                         use std::sync::atomic::Ordering;
@@ -1500,6 +1502,7 @@ impl ComicInfoApp {
         egui::Frame::none()
             .fill(theme::SURF2)
             .stroke(egui::Stroke::new(1.0, theme::BDR))
+            .rounding(egui::Rounding::same(8.0))
             .inner_margin(egui::Margin::symmetric(14.0, 6.0))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -1536,6 +1539,7 @@ impl ComicInfoApp {
         // ── Log output ────────────────────────────────────────────────────────
         egui::Frame::none()
             .fill(theme::BG)
+            .rounding(egui::Rounding::same(8.0))
             .inner_margin(egui::Margin::symmetric(14.0, 8.0))
             .show(ui, |ui| {
                 egui::ScrollArea::vertical()
@@ -1544,7 +1548,7 @@ impl ComicInfoApp {
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
+                        ui.allocate_exact_size(egui::vec2(ui.available_width(), 0.0), egui::Sense::hover());
                         for entry in &self.log {
                             ui.add(egui::Label::new(
                                 RichText::new(&entry.text)
@@ -1559,9 +1563,10 @@ impl ComicInfoApp {
         egui::Frame::none()
             .fill(theme::SURF)
             .stroke(egui::Stroke::new(1.0, theme::BDR))
+            .rounding(egui::Rounding::same(8.0))
             .inner_margin(egui::Margin::symmetric(16.0, 8.0))
             .show(ui, |ui| {
-                ui.set_min_width(ui.available_width());
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 0.0), egui::Sense::hover());
                 ui.horizontal(|ui| {
                     ui.style_mut().spacing.item_spacing.x = 0.0;
                     for &(lbl, val, is_err) in &st {
