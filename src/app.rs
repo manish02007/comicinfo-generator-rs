@@ -1109,8 +1109,9 @@ fn padded(row: &[String], n: usize) -> Vec<String> {
 impl ComicInfoApp {
     fn show_paths(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().id_salt("paths_scr").show(ui, |ui| {
-            ui.add_space(20.0);
-            ui.horizontal(|ui| { ui.add_space(24.0); ui.vertical(|ui| {
+            egui::Frame::none()
+                .inner_margin(egui::Margin::symmetric(20.0, 20.0))
+                .show(ui, |ui| {
 
             theme::card().show(ui, |ui| {
                 theme::section_hdr(ui, "File Paths");
@@ -1146,7 +1147,7 @@ impl ComicInfoApp {
                     .color(theme::TMUT).size(11.0));
             });
 
-            }); }); // horizontal/vertical
+                }); // Frame
         });
     }
 
@@ -1273,8 +1274,9 @@ impl ComicInfoApp {
 
     fn show_metadata(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().id_salt("meta_scr").show(ui, |ui| {
-            ui.add_space(16.0);
-            ui.horizontal(|ui| { ui.add_space(20.0); ui.vertical(|ui| {
+            egui::Frame::none()
+                .inner_margin(egui::Margin::symmetric(20.0, 16.0))
+                .show(ui, |ui| {
 
             theme::card().show(ui, |ui| {
                 theme::section_hdr(ui, "Constant Metadata  (applied to every CBZ)");
@@ -1360,7 +1362,7 @@ impl ComicInfoApp {
                     .font(egui::FontId::new(12.0, egui::FontFamily::Monospace)));
             });
 
-            }); }); // horizontal/vertical
+                }); // Frame
         });
     }
 
@@ -1368,11 +1370,12 @@ impl ComicInfoApp {
         // Divide available height evenly among the 3 rule sections.
         // Each section header+buttons = ~38px, frame margin = ~24px, gaps = ~20px.
         let overhead_per_section = 38.0 + 24.0;
-        let total_overhead       = 3.0 * overhead_per_section + 2.0 * 10.0 + 32.0; // gaps + top pad
+        let total_overhead       = 3.0 * overhead_per_section + 2.0 * 10.0 + 32.0 + 16.0; // gaps + frame margin
         let table_h = ((ui.available_height() - total_overhead) / 3.0).max(80.0);
 
-        ui.add_space(8.0);
-        ui.horizontal(|ui| { ui.add_space(18.0); ui.vertical(|ui| {
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(20.0, 8.0))
+            .show(ui, |ui| {
 
         theme::card().show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
@@ -1398,10 +1401,13 @@ impl ComicInfoApp {
             ) { self.dialog = Some(dlg); }
         });
 
-        }); }); // horizontal/vertical
+            }); // Frame
     }
 
     fn show_run(&mut self, ui: &mut egui::Ui) {
+        egui::Frame::none()
+            .inner_margin(egui::Margin::symmetric(20.0, 0.0))
+            .show(ui, |ui| {
         // ── Control bar ──────────────────────────────────────────────────────
         egui::Frame::none()
             .fill(theme::SURF)
@@ -1571,5 +1577,6 @@ impl ComicInfoApp {
                     }
                 });
             });
+            }); // Frame
     }
 }
