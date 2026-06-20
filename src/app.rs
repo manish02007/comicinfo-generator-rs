@@ -1414,6 +1414,7 @@ impl ComicInfoApp {
             .stroke(egui::Stroke::new(1.0, theme::BDR))
             .inner_margin(egui::Margin::symmetric(16.0, 10.0))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     // Start
                     let start_btn = ui.add_enabled(
@@ -1525,7 +1526,11 @@ impl ComicInfoApp {
             ("XML Updated", self.disp_stats.xml,       false),
             ("Errors",      self.disp_stats.errors,    self.disp_stats.errors > 0),
         ];
-        let stats_h = 62.0;
+        // Stats frame: inner_margin 8 top + 8 bottom = 16, plus content
+        // (~18px number + ~7px spacing + ~12px label ≈ 37px) ≈ 53px real height.
+        // Use a generous 80px budget so it never gets clipped against the
+        // status bar even with minor font/DPI measurement differences.
+        let stats_h = 80.0;
         let log_h   = (ui.available_height() - stats_h).max(60.0);
 
         // ── Log output ────────────────────────────────────────────────────────
@@ -1556,6 +1561,7 @@ impl ComicInfoApp {
             .stroke(egui::Stroke::new(1.0, theme::BDR))
             .inner_margin(egui::Margin::symmetric(16.0, 8.0))
             .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.style_mut().spacing.item_spacing.x = 0.0;
                     for &(lbl, val, is_err) in &st {
