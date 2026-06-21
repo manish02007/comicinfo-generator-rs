@@ -412,9 +412,14 @@ fn process_one(
     // ── Write / Dry-run ───────────────────────────────────────────────────────
     if cfg.dry_run {
         stats.lock().unwrap().processed += 1;
-        let pos = bump_done(tx, done_c, total, stats);
+        // `pos` (completion order) still drives the progress bar via bump_done's
+        // Progress message; the TEXT shown here uses file_idx+1 instead, so the
+        // displayed number matches each file's fixed position in the sorted
+        // list -- consistent with how blocks are now rendered in sort order,
+        // rather than jumping around based on which thread finished first.
+        let _pos = bump_done(tx, done_c, total, stats);
         let mut result = vec![
-            (format!("  [DRY] [{pos}/{total}]  {file}  ->  {new_name}"), LogLevel::Warn),
+            (format!("  [DRY] [{}/{total}]  {file}  ->  {new_name}", file_idx + 1), LogLevel::Warn),
             (format!("           XML title: {xml_title}"), LogLevel::Dim),
         ];
         result.extend(batch);
@@ -446,10 +451,13 @@ fn process_one(
     }
 
     stats.lock().unwrap().processed += 1;
-    // bump_done increments the counter and returns the new position —
-    // this is the only correct way to get the counter in parallel code.
-    let pos = bump_done(tx, done_c, total, stats);
-    let ctr = format!("[{pos}/{total}]");
+    // `pos` (completion order across threads) still drives the progress bar
+    // via bump_done's Progress message. The displayed counter below uses
+    // file_idx+1 instead -- the file's fixed position in the sorted list --
+    // so it matches the order blocks actually render in, rather than
+    // jumping around based on which thread happened to finish first.
+    let _pos = bump_done(tx, done_c, total, stats);
+    let ctr = format!("[{}/{total}]", file_idx + 1);
 
     let mut result = if new_name != file {
         vec![
