@@ -122,6 +122,13 @@ pub fn run(
     ), LogLevel::Head);
     logq(&tx, sep.clone(), LogLevel::Sep);
 
+    // Shared across all threads: written exactly once, the first time this
+    // run actually has something to log to error_log_file. Runs with zero
+    // errors/warnings never touch the file at all, so it stays lean instead
+    // of accumulating an empty header for every successful run.
+    let header_written = Arc::new(AtomicBool::new(false));
+    let run_ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+
     // ── Parallel: normal files ────────────────────────────────────────────────
     // Rayon's ThreadPool::scope lets each task OWN a cloned Sender,
     // avoiding the Sender: !Sync issue with par_iter().for_each.
@@ -140,12 +147,15 @@ pub fn run(
                 let dc_c   = Arc::clone(&done_c);
                 let fim_c  = Arc::clone(&fim);
                 let stop_c = Arc::clone(&stop);
+                let hdr_c  = Arc::clone(&header_written);
+                let run_ts_c = run_ts.clone();
                 let path   = path.clone();
                 s.spawn(move |_| {
                     if stop_c.load(Ordering::Relaxed) { return; }
                     process_one(
                         &path, &cfg_c, &tx_c, None,
                         auto_pad, total, invalid_sep, &st_c, &dc_c, &fim_c,
+                        &hdr_c, &run_ts_c,
                     );
                 });
             }
@@ -158,6 +168,7 @@ pub fn run(
         process_one(
             path, &cfg, &tx, Some(&ui_rx),
             auto_pad, total, invalid_sep, &stats, &done_c, &fim,
+            &header_written, &run_ts,
         );
     }
 
@@ -178,6 +189,8 @@ fn process_one(
     stats:   &Arc<Mutex<RunStats>>,
     done_c:  &Arc<Mutex<usize>>,
     fim:     &Arc<HashMap<String, usize>>,
+    header_written: &AtomicBool,
+    run_ts:  &str,
 ) {
     let file = path.file_name().unwrap_or_default().to_string_lossy().to_string();
     // Position in the originally sorted file list -- used as the sort key
@@ -433,7 +446,7 @@ fn process_one(
                 let mut result = vec![(msg.clone(), LogLevel::Err)];
                 result.extend(batch);
                 flush_batch(tx, file_idx, result);
-                append_error_log(&cfg.error_log_file, &msg);
+                append_error_log(&cfg.error_log_file, &msg, header_written, run_ts);
                 stats.lock().unwrap().errors += 1;
                 bump_done(tx, done_c, total, stats);
                 return;
@@ -442,7 +455,14 @@ fn process_one(
         if path != new_path && !new_path.exists() {
             match std::fs::rename(path, &new_path) {
                 Ok(())  => { stats.lock().unwrap().renamed += 1; }
-                Err(e)  => batch.push((format!("  [WARN] rename failed: {e}"), LogLevel::Warn)),
+                Err(e)  => {
+                    let msg = format!("  [WARN] {file}  -  rename failed: {e}");
+                    batch.push((msg.clone(), LogLevel::Warn));
+                    // The in-app log clears every session; persist this so a
+                    // rename failure isn't lost the moment the app closes,
+                    // same as write failures already are.
+                    append_error_log(&cfg.error_log_file, &msg, header_written, run_ts);
+                }
             }
         } else if new_path.exists() && path != new_path {
             stats.lock().unwrap().rename_skipped += 1;
@@ -548,7 +568,16 @@ fn mark_done(progress_file: &Path, filename: &str) {
     }
 }
 
-fn append_error_log(log: &Path, msg: &str) {
+fn append_error_log(log: &Path, msg: &str, header_written: &AtomicBool, run_ts: &str) {
+    // swap() returns the PREVIOUS value -- exactly one thread among any
+    // number running concurrently will see `false` here and write the
+    // header; every other thread (this run or future calls this run) sees
+    // `true` and skips it. This avoids a separate check-then-write race.
+    if !header_written.swap(true, Ordering::SeqCst) {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
+            let _ = writeln!(f, "=== Run started {run_ts} ===");
+        }
+    }
     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
         let _ = writeln!(f, "[{ts}] {msg}");

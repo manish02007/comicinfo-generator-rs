@@ -302,6 +302,19 @@ impl ComicInfoApp {
         self.rebuild_sep_preview();
         self.status = "Reset to defaults.".to_string();
     }
+
+    /// Opens `path` in the OS's default file manager. Uses a platform-
+    /// specific shell-out instead of adding a new crate dependency just
+    /// for this one action.
+    fn open_in_file_manager(path: &Path) {
+        #[cfg(target_os = "windows")]
+        { let _ = std::process::Command::new("explorer").arg(path).spawn(); }
+        #[cfg(target_os = "macos")]
+        { let _ = std::process::Command::new("open").arg(path).spawn(); }
+        #[cfg(target_os = "linux")]
+        { let _ = std::process::Command::new("xdg-open").arg(path).spawn(); }
+    }
+
     fn smart_filename(&self) -> String {
         let src = if !self.cfg.folder.is_empty() {
             Path::new(&self.cfg.folder).file_name().unwrap_or_default().to_string_lossy().into_owned()
@@ -1217,8 +1230,21 @@ impl ComicInfoApp {
                 });
                 ui.add_space(6.0);
                 let log_path = std::env::current_dir().unwrap_or_default().join("logs");
-                ui.label(RichText::new(format!("Log directory: {}", log_path.display()))
-                    .color(theme::TMUT).size(11.0));
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("Log directory: {}", log_path.display()))
+                        .color(theme::TMUT).size(11.0));
+                    ui.add_space(8.0);
+                    if ui.add(
+                        egui::Button::new(RichText::new("Open Folder").size(11.0).color(theme::TDIM))
+                            .fill(Color32::TRANSPARENT)
+                            .stroke(egui::Stroke::new(1.0, theme::BDR))
+                            .rounding(egui::Rounding::same(4.0))
+                            .min_size(egui::vec2(0.0, 20.0))
+                    ).on_hover_text("Open the folder containing progress and error logs for past runs.").clicked() {
+                        let _ = std::fs::create_dir_all(&log_path);
+                        Self::open_in_file_manager(&log_path);
+                    }
+                });
             });
 
                 }); // Frame
