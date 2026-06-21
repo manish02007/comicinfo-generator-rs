@@ -291,7 +291,15 @@ impl ComicInfoApp {
         }
     }
     fn reset_all(&mut self) {
-        self.cfg = AppConfig::default(); self.rebuild_sep_preview();
+        self.cfg = AppConfig::default();
+        // AppConfig::default() ships with example Volume/Date rules so a
+        // first-time user has a worked example to learn the format from.
+        // "Reset All" is an explicit user action expecting a truly blank
+        // slate, not a reappearance of placeholder data they never entered
+        // themselves -- so clear those out here specifically.
+        self.cfg.volume_rules.clear();
+        self.cfg.date_rules.clear();
+        self.rebuild_sep_preview();
         self.status = "Reset to defaults.".to_string();
     }
     fn smart_filename(&self) -> String {
