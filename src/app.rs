@@ -43,6 +43,7 @@ pub enum Dialog {
                     finale_num: String, finale_idx: usize },
     Notice(String),
     ConfirmReset,
+    ConfirmClearLog,
     /// Shows the list of fields imported from a .py or .json metadata file
     ImportResult { filename: String, items: Vec<(String, String)> },
 }
@@ -761,6 +762,27 @@ impl ComicInfoApp {
                     });
                 if yes { self.reset_all(); }
                 else if !cancel { self.dialog = Some(Dialog::ConfirmReset); }
+            }
+
+            Dialog::ConfirmClearLog => {
+                let mut yes = false; let mut cancel = false;
+                egui::Window::new("Clear Log").resizable(false).collapsible(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                        ui.label("Clear the log output?\nThis only clears the displayed log, not the on-disk progress or error logs.");
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(theme::btn_primary("  Clear  ")).clicked() { yes = true; }
+                            ui.add_space(4.0);
+                            if ui.add(theme::btn_secondary("  Cancel  ")).clicked() { cancel = true; }
+                        });
+                    });
+                if yes {
+                    self.log.clear();
+                    self.file_slots.clear();
+                    self.log_footer.clear();
+                } else if !cancel {
+                    self.dialog = Some(Dialog::ConfirmClearLog);
+                }
             }
 
             // ── Import result ─────────────────────────────────────────────
@@ -1544,9 +1566,12 @@ impl ComicInfoApp {
                                 .stroke(egui::Stroke::new(1.0, theme::BDR))
                                 .rounding(egui::Rounding::same(4.0))
                         ).clicked() {
-                            self.log.clear();
-                            self.file_slots.clear();
-                            self.log_footer.clear();
+                            let has_content = !self.log.is_empty()
+                                || !self.file_slots.is_empty()
+                                || !self.log_footer.is_empty();
+                            if has_content {
+                                self.dialog = Some(Dialog::ConfirmClearLog);
+                            }
                         }
                     });
                 });
