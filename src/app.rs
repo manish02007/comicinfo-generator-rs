@@ -1055,6 +1055,9 @@ impl ComicInfoApp {
         }
 
         // Rows
+        let last_col = cols.len().saturating_sub(1);
+        let fixed_w_except_last: f32 = cols[..last_col].iter().map(|(_, w)| w).sum();
+
         egui::ScrollArea::vertical()
             .id_salt(id).max_height(height).auto_shrink([false,false])
             .show(ui, |ui| {
@@ -1070,20 +1073,33 @@ impl ComicInfoApp {
                     if resp.double_clicked() { *sel = Some(i); dblclk = true; }
                     if ui.is_rect_visible(rect) {
                         ui.painter().rect_filled(rect, egui::Rounding::ZERO, bg);
+                        // Last column stretches to fill whatever width is left in
+                        // the actual row, instead of being capped at its spec'd
+                        // width while the table sits in a much wider panel.
+                        let stretch_last_w = (rect.width() - 12.0 - fixed_w_except_last)
+                            .max(cols[last_col].1);
                         let mut cx = rect.left() + 6.0;
                         for (j, (_, w)) in cols.iter().enumerate() {
                             let txt = row.get(j).map(|s| s.as_str()).unwrap_or("");
+                            let col_w = if j == last_col { stretch_last_w } else { *w };
                             // Clip text to column — rect must have positive dims or egui panics
                             let clip = egui::Rect::from_min_size(
                                 egui::pos2(cx, rect.top()),
-                                egui::vec2((w - 4.0).max(1.0), row_h.max(1.0)),
+                                egui::vec2((col_w - 4.0).max(1.0), row_h.max(1.0)),
                             );
                             ui.painter().with_clip_rect(clip).text(
                                 egui::pos2(cx, rect.center().y),
                                 egui::Align2::LEFT_CENTER, txt,
                                 egui::FontId::new(12.0, egui::FontFamily::Monospace), tc,
                             );
-                            cx += w;
+                            cx += col_w;
+                        }
+                    }
+                    // Hover over any row to read its full, untruncated last-column
+                    // text (e.g. a long Summary) even if it doesn't fit on screen.
+                    if let Some(full_text) = row.get(last_col) {
+                        if !full_text.is_empty() {
+                            resp.on_hover_text(full_text.as_str());
                         }
                     }
                 }
