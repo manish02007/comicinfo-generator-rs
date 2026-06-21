@@ -44,6 +44,8 @@ pub enum Dialog {
     Notice(String),
     ConfirmReset,
     ConfirmClearLog,
+    /// Warns about empty constant-metadata fields before starting a run.
+    EmptyFieldsWarning { fields: Vec<String>, cbzs: Vec<PathBuf> },
     /// Shows the list of fields imported from a .py or .json metadata file
     ImportResult { filename: String, items: Vec<(String, String)> },
 }
@@ -562,6 +564,36 @@ impl ComicInfoApp {
     }
 
     // ── "Start" button ────────────────────────────────────────────────────────
+    /// Lists constant-metadata fields that are empty and would render as
+    /// blank tags in every generated ComicInfo.xml. Year/Month/Day are
+    /// skipped when volume-date rules are active, since those rules supply
+    /// the actual date per-file -- warning about them would be a false
+    /// positive for anyone relying on per-volume dates instead of a single
+    /// constant date. Alt. Series and Web are genuinely optional fields
+    /// most series legitimately don't have, so they're never flagged.
+    fn empty_metadata_fields(&self) -> Vec<String> {
+        let c = &self.cfg;
+        let mut empty = Vec::new();
+        let mut check = |val: &str, label: &str| {
+            if val.trim().is_empty() { empty.push(label.to_string()); }
+        };
+        check(&c.series,     "Series");
+        check(&c.writer,     "Writer");
+        check(&c.penciller,  "Penciller");
+        check(&c.publisher,  "Publisher");
+        check(&c.language,   "Language ISO");
+        check(&c.genre,      "Genre");
+        check(&c.rating,     "Rating");
+        check(&c.count,      "Count");
+        check(&c.summary,    "Summary");
+        if !c.use_vol_date {
+            check(&c.year,  "Year");
+            check(&c.month, "Month");
+            check(&c.day,   "Day");
+        }
+        empty
+    }
+
     fn on_start(&mut self) {
         if self.running { return; }
         let folder = self.cfg.folder.trim().to_string();
@@ -584,6 +616,21 @@ impl ComicInfoApp {
             self.dialog = Some(Dialog::Notice("No .cbz files found in the selected folder.".to_string()));
             return;
         }
+
+        let empty_fields = self.empty_metadata_fields();
+        if !empty_fields.is_empty() {
+            self.dialog = Some(Dialog::EmptyFieldsWarning { fields: empty_fields, cbzs });
+            return;
+        }
+
+        self.continue_start(cbzs);
+    }
+
+    /// Resume-detection + finale-detection, continuing on to start_worker.
+    /// Split out from on_start so the EmptyFieldsWarning dialog's "Continue
+    /// Anyway" button can resume this same flow after the user confirms.
+    fn continue_start(&mut self, cbzs: Vec<PathBuf>) {
+        let folder = self.cfg.folder.trim().to_string();
         // Check for resume
         let fname = Path::new(&folder).canonicalize().unwrap_or_default()
             .file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -803,6 +850,46 @@ impl ComicInfoApp {
                     self.log_footer.clear();
                 } else if !cancel {
                     self.dialog = Some(Dialog::ConfirmClearLog);
+                }
+            }
+
+            // ── Empty metadata fields warning ────────────────────────────────
+            Dialog::EmptyFieldsWarning { fields, cbzs } => {
+                let mut continue_anyway = false;
+                let mut go_back = false;
+                egui::Window::new("Empty Metadata Fields")
+                    .resizable(false).collapsible(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(RichText::new(
+                            "These fields are empty and will be blank in every generated file:"
+                        ).color(theme::TXT));
+                        ui.add_space(6.0);
+                        egui::Frame::none()
+                            .fill(theme::SURF3)
+                            .rounding(egui::Rounding::same(4.0))
+                            .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(fields.join(", "))
+                                    .color(theme::TWARN).strong());
+                            });
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(
+                            "You can continue anyway, or go back to the Metadata tab and fill them in first."
+                        ).color(theme::TDIM).size(11.0));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(theme::btn_primary("  Continue Anyway  ")).clicked() { continue_anyway = true; }
+                            ui.add_space(4.0);
+                            if ui.add(theme::btn_secondary("  Go Back  ")).clicked() { go_back = true; }
+                        });
+                    });
+                if continue_anyway {
+                    self.continue_start(cbzs);
+                } else if go_back {
+                    self.tab = Tab::Metadata;
+                } else {
+                    self.dialog = Some(Dialog::EmptyFieldsWarning { fields, cbzs });
                 }
             }
 
