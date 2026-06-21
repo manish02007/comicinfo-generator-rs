@@ -1423,6 +1423,13 @@ impl ComicInfoApp {
         let total_overhead       = 3.0 * overhead_per_section + 2.0 * 10.0 + 32.0 + 32.0; // gaps + frame margin (16 top + 16 bottom)
         let table_h = ((ui.available_height() - total_overhead) / 3.0).max(80.0);
 
+        // Outer ScrollArea acts as a safety net: in the common case the 3
+        // tables exactly fill the available height and this scrolls nowhere,
+        // but if table_h's minimum (80px each) ever exceeds what's actually
+        // available -- smaller window, different DPI/font metrics -- content
+        // would otherwise clip with no way to reach it. Every other tab
+        // (Paths/Processing/Metadata) already has this same safety net.
+        egui::ScrollArea::vertical().id_salt("rules_scr").show(ui, |ui| {
         egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(20.0, 16.0))
             .show(ui, |ui| {
@@ -1452,6 +1459,7 @@ impl ComicInfoApp {
         });
 
             }); // Frame
+        }); // ScrollArea
     }
 
     fn show_run(&mut self, ui: &mut egui::Ui) {
