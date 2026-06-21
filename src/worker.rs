@@ -23,7 +23,10 @@ pub enum WorkerMsg {
     /// be interleaved by another thread's messages arriving in between --
     /// used to keep one file's whole report (detection + verbose + result)
     /// contiguous even though multiple files are processed in parallel.
-    LogBatch (Vec<(String, LogLevel)>),
+    /// `idx` is the file's position in the originally sorted file list, so
+    /// the UI can slot each block into its correct numeric order even
+    /// though files complete in an arbitrary order across threads.
+    LogBatch { idx: usize, lines: Vec<(String, LogLevel)> },
     Progress { done: usize,  total: usize },
     Stats    { stats: RunStats },
     /// Worker needs a decimal-chapter label choice from the UI thread.
@@ -177,6 +180,10 @@ fn process_one(
     fim:     &Arc<HashMap<String, usize>>,
 ) {
     let file = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+    // Position in the originally sorted file list -- used as the sort key
+    // so the UI can slot this file's log block into correct numeric order
+    // regardless of which thread finishes processing it first.
+    let file_idx = fim.get(&file).copied().unwrap_or(total);
 
     // Resume check
     if cfg.resume_mode && cfg.processed_files.contains(&file) {
@@ -209,7 +216,7 @@ fn process_one(
         None => {
             let mut result = vec![(format!("[WARN] no number found - skipping: {file}"), LogLevel::Warn)];
             result.extend(batch);
-            flush_batch(tx, result);
+            flush_batch(tx, file_idx, result);
             bump_done(tx, done_c, total, stats);
             return;
         }
@@ -277,12 +284,8 @@ fn process_one(
         raw_title.clone()
     };
 
-    let sep      = get_separator(&prefix_word, cfg.use_csep, &cfg.csep);
-    let file_idx = fim.get(&file).copied();
-    let after_finale = matches!(
-        (cfg.finale_index, file_idx),
-        (Some(fi), Some(idx)) if idx > fi
-    );
+    let sep = get_separator(&prefix_word, cfg.use_csep, &cfg.csep);
+    let after_finale = matches!(cfg.finale_index, Some(fi) if file_idx > fi);
 
     // ── Build XML title ───────────────────────────────────────────────────────
     let xml_title = build_xml_title(
@@ -415,7 +418,7 @@ fn process_one(
             (format!("           XML title: {xml_title}"), LogLevel::Dim),
         ];
         result.extend(batch);
-        flush_batch(tx, result);
+        flush_batch(tx, file_idx, result);
         return;
     } else {
         match write_comic_info_to_cbz(path, &xml_content) {
@@ -424,7 +427,7 @@ fn process_one(
                 let msg = format!("  [ERR] {file}  -  {e}");
                 let mut result = vec![(msg.clone(), LogLevel::Err)];
                 result.extend(batch);
-                flush_batch(tx, result);
+                flush_batch(tx, file_idx, result);
                 append_error_log(&cfg.error_log_file, &msg);
                 stats.lock().unwrap().errors += 1;
                 bump_done(tx, done_c, total, stats);
@@ -457,7 +460,7 @@ fn process_one(
         vec![(format!("  [OK] {ctr}  {new_name}"), LogLevel::Ok)]
     };
     result.extend(batch);
-    flush_batch(tx, result);
+    flush_batch(tx, file_idx, result);
 }
 
 // ── XML title builder (extracted for clarity) ─────────────────────────────────
@@ -515,10 +518,11 @@ fn logq(tx: &Sender<WorkerMsg>, text: String, level: LogLevel) {
 
 /// Send every buffered line for one file as a single channel message, so
 /// they arrive at the UI thread as one contiguous block instead of being
-/// interleaved with another thread's lines mid-file.
-fn flush_batch(tx: &Sender<WorkerMsg>, batch: Vec<(String, LogLevel)>) {
+/// interleaved with another thread's lines mid-file. `idx` lets the UI
+/// slot this block into its correct numeric position.
+fn flush_batch(tx: &Sender<WorkerMsg>, idx: usize, batch: Vec<(String, LogLevel)>) {
     if !batch.is_empty() {
-        let _ = tx.send(WorkerMsg::LogBatch(batch));
+        let _ = tx.send(WorkerMsg::LogBatch { idx, lines: batch });
     }
 }
 

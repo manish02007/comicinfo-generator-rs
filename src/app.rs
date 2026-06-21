@@ -81,6 +81,15 @@ pub struct ComicInfoApp {
     pub progress:   (usize, usize),
     pub disp_stats: DisplayStats,
     pub log:        Vec<LogEntry>,
+    // Per-file log blocks, indexed by the file's position in the originally
+    // sorted file list. Rendered in index order (skipping unfilled slots)
+    // so completed files always display in numeric order regardless of
+    // which thread finishes processing them first.
+    pub file_slots: Vec<Option<Vec<LogEntry>>>,
+    // The [DONE] footer + its separators, kept apart from file_slots so it
+    // always renders after every file block instead of wherever it happened
+    // to arrive chronologically.
+    pub log_footer: Vec<LogEntry>,
     // Deferred run (set in dialogs, processed before rendering)
     pub pending_start: Option<(Vec<std::path::PathBuf>, std::collections::HashSet<String>, bool)>,
     // Autosave
@@ -105,6 +114,8 @@ impl ComicInfoApp {
             progress:    (0, 0),
             disp_stats:  DisplayStats::default(),
             log:         Vec::new(),
+            file_slots:  Vec::new(),
+            log_footer:  Vec::new(),
             pending_start: None,
             last_save:   std::time::Instant::now(),
         };
@@ -385,13 +396,19 @@ impl ComicInfoApp {
                     self.log.push(LogEntry { text, level });
                     ctx.request_repaint();
                 }
-                Ok(WorkerMsg::LogBatch(lines)) => {
-                    // All of one file's lines arrive together in one message;
-                    // push them in one go so they stay contiguous in the log
-                    // even though other files' batches may interleave with
-                    // this one at the message level (unavoidable with true
-                    // parallel processing, but each file's own block is safe).
-                    self.log.extend(lines.into_iter().map(|(text, level)| LogEntry { text, level }));
+                Ok(WorkerMsg::LogBatch { idx, lines }) => {
+                    // Fill this file's reserved slot so it renders in
+                    // correct numeric order, regardless of which thread
+                    // actually finished processing it first.
+                    let entries: Vec<LogEntry> = lines.into_iter()
+                        .map(|(text, level)| LogEntry { text, level })
+                        .collect();
+                    if idx < self.file_slots.len() {
+                        self.file_slots[idx] = Some(entries);
+                    } else {
+                        // Defensive fallback (shouldn't happen): just append.
+                        self.log.extend(entries);
+                    }
                     ctx.request_repaint();
                 }
                 Ok(WorkerMsg::Progress { done, total }) => {
@@ -421,7 +438,7 @@ impl ComicInfoApp {
                     };
                     let sep = "-".repeat(60);
                     let ts  = chrono::Local::now().format("%H:%M:%S");
-                    self.log.push(LogEntry { text: sep.clone(),                             level: LogLevel::Sep });
+                    self.log_footer.push(LogEntry { text: sep.clone(), level: LogLevel::Sep });
                     let (msg, lvl, st) = if stats.errors > 0 {
                         (format!("  [DONE] {ts}  -  {} errors", stats.errors), LogLevel::Warn,
                          format!("Done  -  {} error(s).", stats.errors))
@@ -429,8 +446,8 @@ impl ComicInfoApp {
                         (format!("  [DONE] {ts}  -  {} processed  -  {} renamed  -  0 errors",
                                  stats.processed, stats.renamed), LogLevel::Ok, "Done.".to_string())
                     };
-                    self.log.push(LogEntry { text: msg, level: lvl });
-                    self.log.push(LogEntry { text: sep, level: LogLevel::Sep });
+                    self.log_footer.push(LogEntry { text: msg, level: lvl });
+                    self.log_footer.push(LogEntry { text: sep, level: LogLevel::Sep });
                     self.status = st;
                     ctx.request_repaint();
                     return;
@@ -506,6 +523,8 @@ impl ComicInfoApp {
         self.ui_tx     = Some(utx);
         self.running   = true;
         self.progress  = (0, cbz_files.len());
+        self.file_slots = vec![None; cbz_files.len()];
+        self.log_footer.clear();
 
         use std::sync::atomic::Ordering;
         self.stop_flag.store(false, Ordering::Relaxed);
@@ -1524,7 +1543,11 @@ impl ComicInfoApp {
                                 .fill(Color32::TRANSPARENT)
                                 .stroke(egui::Stroke::new(1.0, theme::BDR))
                                 .rounding(egui::Rounding::same(4.0))
-                        ).clicked() { self.log.clear(); }
+                        ).clicked() {
+                            self.log.clear();
+                            self.file_slots.clear();
+                            self.log_footer.clear();
+                        }
                     });
                 });
             });
@@ -1560,7 +1583,32 @@ impl ComicInfoApp {
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
                         ui.allocate_exact_size(egui::vec2(ui.available_width(), 0.0), egui::Sense::hover());
+
+                        // 1. Header lines (Started/sep, resume/fresh-start notices)
                         for entry in &self.log {
+                            ui.add(egui::Label::new(
+                                RichText::new(&entry.text)
+                                    .color(entry.level.color())
+                                    .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
+                            ).wrap_mode(egui::TextWrapMode::Extend));
+                        }
+                        // 2. Per-file blocks, in numeric order -- only files that
+                        //    have actually completed are shown; gaps (files still
+                        //    in progress on other threads) are simply skipped for
+                        //    now and filled in once they arrive.
+                        for slot in &self.file_slots {
+                            if let Some(entries) = slot {
+                                for entry in entries {
+                                    ui.add(egui::Label::new(
+                                        RichText::new(&entry.text)
+                                            .color(entry.level.color())
+                                            .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
+                                    ).wrap_mode(egui::TextWrapMode::Extend));
+                                }
+                            }
+                        }
+                        // 3. Footer ([DONE] + separators), always last
+                        for entry in &self.log_footer {
                             ui.add(egui::Label::new(
                                 RichText::new(&entry.text)
                                     .color(entry.level.color())
