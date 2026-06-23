@@ -55,26 +55,19 @@ pub struct AppConfig {
     // Zero-pad
     pub zero_pad:  bool,
     pub pad_width: usize,
-    // Metadata fields
-    pub series:     String,
-    pub writer:     String,
-    pub penciller:  String,
-    pub publisher:  String,
-    pub language:   String,
-    pub alt_series: String,
-    pub web:        String,
-    pub genre:      String,
-    pub rating:     String,
-    pub year:       String,
-    pub month:      String,
-    pub day:        String,
-    pub count:      String,
-    pub summary:    String,
+    // Constant metadata fields. Each entry is (ComicInfo tag name, value),
+    // e.g. ("Series", "Shotgun Boy"). Order here is just the UI's add-order;
+    // XML output is always re-sorted into canonical schema order regardless.
+    // Choosable from the full ComicInfo v2.1 field list via "Add Tag" in the
+    // Metadata tab -- see processing::COMICINFO_FIELDS.
+    pub metadata_fields: Vec<(String, String)>,
+    // Summary is kept separate from metadata_fields: it has its own
+    // dedicated multi-line UI and chapter-1/fallback override logic.
+    pub summary: String,
     // Rules
-    pub volume_rules:  Vec<Vec<String>>,  // [ch_start, ch_end, volume]
-    pub date_rules:    Vec<Vec<String>>,  // [vol_start, vol_end, year, month, day]
-    pub summ_rules:    Vec<Vec<String>>,  // [vol_start, vol_end, summary]
-    pub custom_fields: Vec<Vec<String>>,  // [field_name, value]
+    pub volume_rules: Vec<Vec<String>>,  // [ch_start, ch_end, volume]
+    pub date_rules:   Vec<Vec<String>>,  // [vol_start, vol_end, year, month, day]
+    pub summ_rules:   Vec<Vec<String>>,  // [vol_start, vol_end, summary]
 }
 
 impl Default for AppConfig {
@@ -90,11 +83,26 @@ impl Default for AppConfig {
             post_finale: PostFinale::Strip,
             csep_on: false, csep: "...".to_string(),
             zero_pad: false, pad_width: 2,
-            series: String::new(), writer: String::new(), penciller: String::new(),
-            publisher: String::new(), language: "en".to_string(), alt_series: String::new(),
-            web: String::new(), genre: String::new(), rating: String::new(),
-            year: String::new(), month: String::new(), day: String::new(),
-            count: String::new(), summary: String::new(),
+            // Same starting field set as before this feature, so existing
+            // users see a familiar default. "Rating" is renamed to the
+            // correct standard tag "CommunityRating" (the old "Rating" tag
+            // was never part of the actual ComicInfo schema).
+            metadata_fields: vec![
+                ("Series".to_string(),          String::new()),
+                ("Writer".to_string(),          String::new()),
+                ("Penciller".to_string(),       String::new()),
+                ("Publisher".to_string(),       String::new()),
+                ("LanguageISO".to_string(),     "en".to_string()),
+                ("AlternateSeries".to_string(), String::new()),
+                ("Genre".to_string(),           String::new()),
+                ("CommunityRating".to_string(), String::new()),
+                ("Year".to_string(),            String::new()),
+                ("Month".to_string(),           String::new()),
+                ("Day".to_string(),             String::new()),
+                ("Count".to_string(),           String::new()),
+                ("Web".to_string(),              String::new()),
+            ],
+            summary: String::new(),
             volume_rules: vec![
                 vec!["1".into(),  "3.5".into(), "1".into()],
                 vec!["4".into(),  "8.5".into(), "2".into()],
@@ -105,8 +113,7 @@ impl Default for AppConfig {
                 vec!["2".into(),"2".into(),"2021".into(),"1".into(), "19".into()],
                 vec!["3".into(),"3".into(),"2021".into(),"6".into(),  "1".into()],
             ],
-            summ_rules:    Vec::new(),
-            custom_fields: Vec::new(),
+            summ_rules: Vec::new(),
         }
     }
 }

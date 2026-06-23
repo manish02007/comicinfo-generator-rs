@@ -15,7 +15,7 @@ pub enum Tab { #[default] Paths, Processing, Metadata, Rules, Run }
 
 // ── Rule-edit dialog state ────────────────────────────────────────────────────
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum RuleTarget { Volume, Date, Summary, CustomField }
+pub enum RuleTarget { Volume, Date, Summary }
 
 #[derive(Debug, Clone)]
 pub struct RuleEditState {
@@ -46,6 +46,9 @@ pub enum Dialog {
     ConfirmClearLog,
     /// Warns about empty constant-metadata fields before starting a run.
     EmptyFieldsWarning { fields: Vec<String>, cbzs: Vec<PathBuf> },
+    /// Lists all ComicInfo schema fields not currently in metadata_fields,
+    /// letting the user pick one to add.
+    AddMetadataTag,
     /// Shows the list of fields imported from a .py or .json metadata file
     ImportResult { filename: String, items: Vec<(String, String)> },
 }
@@ -70,7 +73,7 @@ pub struct ComicInfoApp {
     pub vol_sel:  Option<usize>,
     pub date_sel: Option<usize>,
     pub summ_sel: Option<usize>,
-    pub cust_sel: Option<usize>,
+    pub meta_field_sel: Option<String>,
     // Dialog
     pub dialog: Option<Dialog>,
     // Path-picker
@@ -108,7 +111,7 @@ impl ComicInfoApp {
             sep_preview: String::new(),
             status:      "Ready.".to_string(),
             verbose:     false,
-            vol_sel:     None, date_sel: None, summ_sel: None, cust_sel: None,
+            vol_sel:     None, date_sel: None, summ_sel: None, meta_field_sel: None,
             dialog:      None,
             pick_kind:   None, pick_rx: None,
             running:     false,
@@ -264,23 +267,18 @@ impl ComicInfoApp {
             } else {
                 val.clone()
             };
-            match key.as_str() {
-                "Series"          => { self.cfg.series     = val.clone(); imported.push(("Series".into(),          display_val)); }
-                "Writer"          => { self.cfg.writer     = val.clone(); imported.push(("Writer".into(),          display_val)); }
-                "Penciller"       => { self.cfg.penciller  = val.clone(); imported.push(("Penciller".into(),       display_val)); }
-                "Publisher"       => { self.cfg.publisher  = val.clone(); imported.push(("Publisher".into(),       display_val)); }
-                "LanguageISO"     => { self.cfg.language   = val.clone(); imported.push(("Language ISO".into(),    display_val)); }
-                "AlternateSeries" => { self.cfg.alt_series = val.clone(); imported.push(("Alt. Series".into(),     display_val)); }
-                "Web"             => { self.cfg.web        = val.clone(); imported.push(("Web".into(),             display_val)); }
-                "Genre"           => { self.cfg.genre      = val.clone(); imported.push(("Genre".into(),           display_val)); }
-                "Rating"          => { self.cfg.rating     = val.clone(); imported.push(("Rating".into(),          display_val)); }
-                "Year"            => { self.cfg.year       = val.clone(); imported.push(("Year".into(),            display_val)); }
-                "Month"           => { self.cfg.month      = val.clone(); imported.push(("Month".into(),           display_val)); }
-                "Day"             => { self.cfg.day        = val.clone(); imported.push(("Day".into(),             display_val)); }
-                "Count"           => { self.cfg.count      = val.clone(); imported.push(("Count".into(),           display_val)); }
-                "Summary"         => { self.cfg.summary    = val.clone(); imported.push(("Summary".into(),         display_val)); }
-                _ => {} // unknown field — silently skip
+            // "Rating" is a legacy alias: the old app emitted a non-standard
+            // <Rating> tag; the real schema field is CommunityRating.
+            let tag = if key == "Rating" { "CommunityRating" } else { key.as_str() };
+
+            if tag == "Summary" {
+                self.cfg.summary = val.clone();
+                imported.push(("Summary".to_string(), display_val));
+            } else if let Some(spec) = field_spec(tag) {
+                self.set_metadata_field(tag, val.clone());
+                imported.push((spec.label.to_string(), display_val));
             }
+            // else: not a recognised ComicInfo field -- silently skip.
         }
 
         if imported.is_empty() {
@@ -320,7 +318,12 @@ impl ComicInfoApp {
     fn smart_filename(&self) -> String {
         let src = if !self.cfg.folder.is_empty() {
             Path::new(&self.cfg.folder).file_name().unwrap_or_default().to_string_lossy().into_owned()
-        } else { self.cfg.series.clone() };
+        } else {
+            self.cfg.metadata_fields.iter()
+                .find(|(t, _)| t == "Series")
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
         let slug: String = src.chars()
             .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
             .collect::<String>().split("__").collect::<Vec<_>>().join("_").to_lowercase();
@@ -501,14 +504,8 @@ impl ComicInfoApp {
             post_finale_mode: match self.cfg.post_finale { PostFinale::Strip => "strip", PostFinale::Keep => "keep" }.to_string(),
             use_csep: self.cfg.csep_on, csep: self.cfg.csep.clone(),
             zero_pad: self.cfg.zero_pad, pad_width: self.cfg.pad_width,
-            series: self.cfg.series.clone(), writer: self.cfg.writer.clone(),
-            penciller: self.cfg.penciller.clone(), publisher: self.cfg.publisher.clone(),
-            language: self.cfg.language.clone(), alt_series: self.cfg.alt_series.clone(),
-            web: self.cfg.web.clone(), genre: self.cfg.genre.clone(),
-            rating: self.cfg.rating.clone(), year: self.cfg.year.clone(),
-            month: self.cfg.month.clone(), day: self.cfg.day.clone(),
-            count: self.cfg.count.clone(), summary: self.cfg.summary.clone(),
-            custom_fields: self.cfg.custom_fields.clone(),
+            metadata_fields: self.cfg.metadata_fields.iter().cloned().collect(),
+            summary: self.cfg.summary.clone(),
             volume_rules:  self.cfg.volume_rules.clone(),
             date_rules:    self.cfg.date_rules.clone(),
             summ_rules:    self.cfg.summ_rules.clone(),
@@ -564,34 +561,37 @@ impl ComicInfoApp {
     }
 
     // ── "Start" button ────────────────────────────────────────────────────────
-    /// Lists constant-metadata fields that are empty and would render as
-    /// blank tags in every generated ComicInfo.xml. Year/Month/Day are
-    /// skipped when volume-date rules are active, since those rules supply
-    /// the actual date per-file -- warning about them would be a false
-    /// positive for anyone relying on per-volume dates instead of a single
-    /// constant date. Alt. Series and Web are genuinely optional fields
-    /// most series legitimately don't have, so they're never flagged.
+    /// Lists constant-metadata fields the user has added that are still
+    /// empty and would render as blank tags in every generated ComicInfo.xml.
+    /// Year/Month/Day are skipped when volume-date rules are active, since
+    /// those rules supply the actual date per-file -- warning about them
+    /// would be a false positive for anyone relying on per-volume dates.
+    /// Fields the user never added in the first place are never flagged --
+    /// choosing not to include a field IS the "this is optional" signal now.
     fn empty_metadata_fields(&self) -> Vec<String> {
-        let c = &self.cfg;
         let mut empty = Vec::new();
-        let mut check = |val: &str, label: &str| {
-            if val.trim().is_empty() { empty.push(label.to_string()); }
-        };
-        check(&c.series,     "Series");
-        check(&c.writer,     "Writer");
-        check(&c.penciller,  "Penciller");
-        check(&c.publisher,  "Publisher");
-        check(&c.language,   "Language ISO");
-        check(&c.genre,      "Genre");
-        check(&c.rating,     "Rating");
-        check(&c.count,      "Count");
-        check(&c.summary,    "Summary");
-        if !c.use_vol_date {
-            check(&c.year,  "Year");
-            check(&c.month, "Month");
-            check(&c.day,   "Day");
+        for (tag, val) in &self.cfg.metadata_fields {
+            if self.cfg.use_vol_date && matches!(tag.as_str(), "Year" | "Month" | "Day") {
+                continue;
+            }
+            if val.trim().is_empty() {
+                let label = field_spec(tag).map(|s| s.label).unwrap_or(tag.as_str());
+                empty.push(label.to_string());
+            }
+        }
+        if self.cfg.summary.trim().is_empty() {
+            empty.push("Summary".to_string());
         }
         empty
+    }
+
+    /// Inserts or updates a tag in metadata_fields (add-if-missing semantics).
+    fn set_metadata_field(&mut self, tag: &str, val: String) {
+        if let Some(entry) = self.cfg.metadata_fields.iter_mut().find(|(t, _)| t == tag) {
+            entry.1 = val;
+        } else {
+            self.cfg.metadata_fields.push((tag.to_string(), val));
+        }
     }
 
     fn on_start(&mut self) {
@@ -710,8 +710,6 @@ impl ComicInfoApp {
                         (RuleTarget::Date,        Some(i)) => { if i < self.cfg.date_rules.len() { self.cfg.date_rules[i] = vals; } }
                         (RuleTarget::Summary,     None)    => self.cfg.summ_rules.push(vals),
                         (RuleTarget::Summary,     Some(i)) => { if i < self.cfg.summ_rules.len() { self.cfg.summ_rules[i] = vals; } }
-                        (RuleTarget::CustomField, None)    => self.cfg.custom_fields.push(vals),
-                        (RuleTarget::CustomField, Some(i)) => { if i < self.cfg.custom_fields.len() { self.cfg.custom_fields[i] = vals; } }
                     }
                 } else if !cancelled { self.dialog = Some(Dialog::EditRule(s)); }
             }
@@ -890,6 +888,58 @@ impl ComicInfoApp {
                     self.tab = Tab::Metadata;
                 } else {
                     self.dialog = Some(Dialog::EmptyFieldsWarning { fields, cbzs });
+                }
+            }
+
+            // ── Add metadata tag ─────────────────────────────────────────────
+            Dialog::AddMetadataTag => {
+                let mut open = true;
+                let mut picked: Option<&'static str> = None;
+                let existing: HashSet<&str> = self.cfg.metadata_fields.iter()
+                    .map(|(t, _)| t.as_str()).collect();
+
+                // Sorted alphabetically by display label for a predictable,
+                // easy-to-scan picker rather than schema/insertion order.
+                let mut available: Vec<&'static FieldSpec> = COMICINFO_FIELDS.iter()
+                    .filter(|f| !existing.contains(f.tag))
+                    .collect();
+                available.sort_by_key(|f| f.label);
+
+                egui::Window::new("Add Metadata Tag")
+                    .resizable(true).collapsible(false)
+                    .min_width(320.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(RichText::new("Choose a field to add:")
+                            .color(theme::TDIM).size(11.0));
+                        ui.add_space(6.0);
+
+                        if available.is_empty() {
+                            ui.label(RichText::new("All available fields have already been added.")
+                                .color(theme::TDIM).size(12.0));
+                        } else {
+                            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                                for spec in &available {
+                                    let resp = ui.add(
+                                        egui::Button::new(RichText::new(spec.label).color(theme::TXT).size(12.0))
+                                            .fill(theme::SURF3)
+                                            .stroke(egui::Stroke::new(1.0, theme::BDR))
+                                            .rounding(egui::Rounding::same(4.0))
+                                            .min_size(egui::vec2(ui.available_width(), 26.0))
+                                    ).on_hover_text(spec.tip);
+                                    if resp.clicked() { picked = Some(spec.tag); }
+                                    ui.add_space(2.0);
+                                }
+                            });
+                        }
+                        ui.add_space(8.0);
+                        if ui.add(theme::btn_secondary("  Close  ")).clicked() { open = false; }
+                    });
+
+                if let Some(tag) = picked {
+                    self.cfg.metadata_fields.push((tag.to_string(), String::new()));
+                } else if open {
+                    self.dialog = Some(Dialog::AddMetadataTag);
                 }
             }
 
@@ -1465,81 +1515,151 @@ impl ComicInfoApp {
                 .inner_margin(egui::Margin::symmetric(20.0, 16.0))
                 .show(ui, |ui| {
 
-            theme::card().show(ui, |ui| {
-                theme::section_hdr(ui, "Constant Metadata  (applied to every CBZ)");
-                // Split into two equal columns; each has its own label+field grid
-                // so field widths are independent of label text length.
-                let lbl = |t: &str| RichText::new(t).color(theme::TXT).size(12.0);
-                let (s, w, pe, pu, l, al, g, r, y, mo, d, c) = (
-                    &mut self.cfg.series,   &mut self.cfg.writer,
-                    &mut self.cfg.penciller,&mut self.cfg.publisher,
-                    &mut self.cfg.language, &mut self.cfg.alt_series,
-                    &mut self.cfg.genre,    &mut self.cfg.rating,
-                    &mut self.cfg.year,     &mut self.cfg.month,
-                    &mut self.cfg.day,      &mut self.cfg.count,
-                );
-                ui.columns(2, |cols| {
-                    egui::Grid::new("mgl").num_columns(2).spacing([8.0,6.0])
-                        .min_col_width(0.0).show(&mut cols[0], |ui| {
-                            ui.label(lbl("Series:"));
-                            ui.add(egui::TextEdit::singleline(s).desired_width(f32::INFINITY))
-                                .on_hover_text("Comic series title."); ui.end_row();
-                            ui.label(lbl("Penciller:"));
-                            ui.add(egui::TextEdit::singleline(pe).desired_width(f32::INFINITY))
-                                .on_hover_text("Penciller / illustrator."); ui.end_row();
-                            ui.label(lbl("Language ISO:"));
-                            ui.add(egui::TextEdit::singleline(l).desired_width(f32::INFINITY))
-                                .on_hover_text("ISO code: \"en\", \"ja\", \"ko\" ..."); ui.end_row();
-                            ui.label(lbl("Genre:"));
-                            ui.add(egui::TextEdit::singleline(g).desired_width(f32::INFINITY))
-                                .on_hover_text("Genres, comma-separated."); ui.end_row();
-                            ui.label(lbl("Year:"));
-                            ui.add(egui::TextEdit::singleline(y).desired_width(f32::INFINITY))
-                                .on_hover_text("Default publication year."); ui.end_row();
-                            ui.label(lbl("Day:"));
-                            ui.add(egui::TextEdit::singleline(d).desired_width(f32::INFINITY))
-                                .on_hover_text("Default publication day."); ui.end_row();
-                        });
-                    egui::Grid::new("mgr").num_columns(2).spacing([8.0,6.0])
-                        .min_col_width(0.0).show(&mut cols[1], |ui| {
-                            ui.label(lbl("Writer:"));
-                            ui.add(egui::TextEdit::singleline(w).desired_width(f32::INFINITY))
-                                .on_hover_text("Script writer / author."); ui.end_row();
-                            ui.label(lbl("Publisher:"));
-                            ui.add(egui::TextEdit::singleline(pu).desired_width(f32::INFINITY))
-                                .on_hover_text("Publisher names, comma-separated."); ui.end_row();
-                            ui.label(lbl("Alt. Series:"));
-                            ui.add(egui::TextEdit::singleline(al).desired_width(f32::INFINITY))
-                                .on_hover_text("Original / alternate series title."); ui.end_row();
-                            ui.label(lbl("Rating:"));
-                            ui.add(egui::TextEdit::singleline(r).desired_width(f32::INFINITY))
-                                .on_hover_text("Score, e.g. 7.7"); ui.end_row();
-                            ui.label(lbl("Month:"));
-                            ui.add(egui::TextEdit::singleline(mo).desired_width(f32::INFINITY))
-                                .on_hover_text("Default publication month."); ui.end_row();
-                            ui.label(lbl("Count:"));
-                            ui.add(egui::TextEdit::singleline(c).desired_width(f32::INFINITY))
-                                .on_hover_text("Total chapter / volume count."); ui.end_row();
-                        });
-                });
-                // Web — full width below both columns
-                ui.horizontal(|ui| {
-                    ui.label(lbl("Web:"));
-                    ui.add(egui::TextEdit::singleline(&mut self.cfg.web)
-                        .desired_width(f32::INFINITY))
-                        .on_hover_text("Space-separated URLs for the series.");
-                });
-            });
-            ui.add_space(10.0);
+            let mut pending_dialog: Option<Dialog> = None;
+            let mut pending_remove: bool = false;
 
             theme::card().show(ui, |ui| {
-                if let Some(dlg) = Self::rule_section(
-                    ui, "Custom XML Fields", "cf",
-                    &[("Field Name", 200.0), ("Value", 500.0)],
-                    &mut self.cfg.custom_fields,
-                    &mut self.cust_sel, 110.0, RuleTarget::CustomField,
-                ) { self.dialog = Some(dlg); }
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Constant Metadata  (applied to every CBZ)")
+                        .color(theme::TXT).strong().size(12.5));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.add(
+                            egui::Button::new(RichText::new("Remove").size(11.0).color(theme::TERR))
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::new(1.0, theme::BDR))
+                                .rounding(egui::Rounding::same(5.0))
+                                .min_size(egui::vec2(0.0, 24.0))
+                        ).on_hover_text("Remove the selected field below.").clicked() {
+                            pending_remove = true;
+                        }
+                        ui.add_space(2.0);
+                        if ui.add(
+                            egui::Button::new(RichText::new("Add Tag").size(11.0).color(theme::TGOOD))
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::new(1.0, theme::BDR))
+                                .rounding(egui::Rounding::same(5.0))
+                                .min_size(egui::vec2(0.0, 24.0))
+                        ).on_hover_text("Add another ComicInfo field.").clicked() {
+                            pending_dialog = Some(Dialog::AddMetadataTag);
+                        }
+                    });
+                });
+                ui.add_space(8.0);
+
+                // Display fields in canonical schema order regardless of the
+                // order they were added in, for a stable, predictable layout.
+                let sel_tag = self.meta_field_sel.clone();
+                let mut new_sel = sel_tag.clone();
+                let mut order: Vec<usize> = (0..self.cfg.metadata_fields.len()).collect();
+                order.sort_by_key(|&i| canonical_index(&self.cfg.metadata_fields[i].0));
+
+                // ui.horizontal_wrapped() doesn't reliably detect the row
+                // boundary when nested this deep inside Frame/ScrollArea --
+                // content just overflows sideways instead of wrapping. Work
+                // out row breaks manually instead: estimate each field's
+                // rendered width (label text + input box + spacing) and
+                // start a new row whenever the next field wouldn't fit.
+                //
+                // The estimate below is deliberately generous (overestimates
+                // rather than underestimates): selectable_label has its own
+                // internal button-style padding beyond raw text bounds, and
+                // a flat per-character heuristic can't capture that exactly.
+                // If a row's real rendered width comes out even slightly
+                // wider than predicted, the card's Frame grows to match the
+                // overflow -- so a 24px safety margin off avail_w plus
+                // generous per-unit padding ensures rows always fit with
+                // room to spare rather than risking overflow.
+                let avail_w = (ui.available_width() - 24.0).max(100.0);
+                let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+                let mut row_w: f32 = 0.0;
+                for &i in &order {
+                    let tag       = &self.cfg.metadata_fields[i].0;
+                    let spec      = field_spec(tag);
+                    let label_txt = spec.map(|s| s.label).unwrap_or(tag.as_str());
+                    let width     = spec.map(|s| s.width).unwrap_or(150.0);
+                    // ~9px/char (covers selectable_label's button padding)
+                    // plus the input box width and a generous fixed gap.
+                    let unit_w = (label_txt.len() as f32 * 9.0) + 16.0 + width + 28.0;
+                    if row_w + unit_w > avail_w && !rows.last().unwrap().is_empty() {
+                        rows.push(Vec::new());
+                        row_w = 0.0;
+                    }
+                    rows.last_mut().unwrap().push(i);
+                    row_w += unit_w;
+                }
+
+                for row in &rows {
+                    ui.horizontal(|ui| {
+                        for &i in row {
+                            let (tag, val) = &mut self.cfg.metadata_fields[i];
+                            let spec      = field_spec(tag);
+                            let label_txt = spec.map(|s| s.label).unwrap_or(tag.as_str());
+                            let width     = spec.map(|s| s.width).unwrap_or(150.0);
+                            let tip       = spec.map(|s| s.tip).unwrap_or("");
+                            let is_sel    = sel_tag.as_deref() == Some(tag.as_str());
+
+                            if ui.selectable_label(is_sel, format!("{label_txt}:")).clicked() {
+                                new_sel = if is_sel { None } else { Some(tag.clone()) };
+                            }
+                            match spec.map(|s| s.kind) {
+                                Some(FieldKind::Numeric { max_digits }) => {
+                                    let r = ui.add(egui::TextEdit::singleline(val).desired_width(width));
+                                    if r.changed() {
+                                        *val = val.chars().filter(|c| c.is_ascii_digit())
+                                            .take(max_digits).collect();
+                                    }
+                                    r.on_hover_text(tip);
+                                }
+                                Some(FieldKind::Decimal { min, max }) => {
+                                    let r = ui.add(egui::TextEdit::singleline(val).desired_width(width));
+                                    if r.changed() {
+                                        let mut seen_dot = false;
+                                        *val = val.chars().filter(|&c| {
+                                            if c.is_ascii_digit() { true }
+                                            else if c == '.' && !seen_dot { seen_dot = true; true }
+                                            else { false }
+                                        }).collect();
+                                    }
+                                    if r.lost_focus() {
+                                        if let Ok(n) = val.parse::<f64>() {
+                                            *val = format!("{:.1}", n.clamp(min, max));
+                                        } else if !val.trim().is_empty() {
+                                            val.clear();
+                                        }
+                                    }
+                                    r.on_hover_text(tip);
+                                }
+                                Some(FieldKind::Enum(options)) => {
+                                    egui::ComboBox::from_id_salt(format!("cb_{tag}"))
+                                        .width(width)
+                                        .selected_text(val.as_str())
+                                        .show_ui(ui, |ui| {
+                                            for opt in options {
+                                                ui.selectable_value(val, opt.to_string(), *opt);
+                                            }
+                                        }).response.on_hover_text(tip);
+                                }
+                                _ => {
+                                    ui.add(egui::TextEdit::singleline(val).desired_width(width))
+                                        .on_hover_text(tip);
+                                }
+                            }
+                            ui.add_space(10.0);
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+
+                self.meta_field_sel = new_sel;
             });
+
+            if pending_remove {
+                if let Some(tag) = self.meta_field_sel.take() {
+                    self.cfg.metadata_fields.retain(|(t, _)| t != &tag);
+                }
+            }
+            if pending_dialog.is_some() { self.dialog = pending_dialog; }
+
             ui.add_space(10.0);
 
             theme::card().show(ui, |ui| {

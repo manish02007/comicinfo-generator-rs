@@ -52,21 +52,11 @@ pub struct WorkerConfig {
     pub csep:             String,
     pub zero_pad:         bool,
     pub pad_width:        usize,
-    pub series:           String,
-    pub writer:           String,
-    pub penciller:        String,
-    pub publisher:        String,
-    pub language:         String,
-    pub alt_series:       String,
-    pub web:              String,
-    pub genre:            String,
-    pub rating:           String,
-    pub year:             String,
-    pub month:            String,
-    pub day:              String,
-    pub count:            String,
+    // Constant metadata as a dynamic tag->value map (e.g. "Series" -> "...").
+    // Built from AppConfig::metadata_fields; the exact set of tags present
+    // is entirely user-chosen via Add Tag / Remove in the Metadata tab.
+    pub metadata_fields:  HashMap<String, String>,
     pub summary:          String,
-    pub custom_fields:    Vec<Vec<String>>,
     pub volume_rules:     Vec<Vec<String>>,
     pub date_rules:       Vec<Vec<String>>,
     pub summ_rules:       Vec<Vec<String>>,
@@ -307,30 +297,20 @@ fn process_one(
     );
 
     // ── Metadata dict ─────────────────────────────────────────────────────────
-    let mut md: HashMap<&str, String> = HashMap::new();
-    md.insert("Title",           xml_title.clone());
-    md.insert("Number",          number.clone());
-    md.insert("Series",          cfg.series.clone());
-    md.insert("Writer",          cfg.writer.clone());
-    md.insert("Penciller",       cfg.penciller.clone());
-    md.insert("Publisher",       cfg.publisher.clone());
-    md.insert("LanguageISO",     cfg.language.clone());
-    md.insert("AlternateSeries", cfg.alt_series.clone());
-    md.insert("Web",             cfg.web.clone());
-    md.insert("Genre",           cfg.genre.clone());
-    md.insert("Rating",          cfg.rating.clone());
-    md.insert("Year",            cfg.year.clone());
-    md.insert("Month",           cfg.month.clone());
-    md.insert("Day",             cfg.day.clone());
-    md.insert("Count",           cfg.count.clone());
-    md.insert("Summary",         cfg.summary.clone());
+    // Start from the user's chosen constant-metadata tags (whatever set they
+    // configured via Add Tag / Remove), then layer Title/Number/Volume/
+    // Summary on top -- those four are always computed by this app's own
+    // logic, never part of the user-editable constant set.
+    let mut md: HashMap<String, String> = cfg.metadata_fields.clone();
+    md.insert("Title".to_string(),  xml_title.clone());
+    md.insert("Number".to_string(), number.clone());
 
     // Volume
     let volume = if cfg.use_vol {
         if mode_str == "volume" { Some(number.clone()) }
         else { find_volume(&orig_num, &cfg.volume_rules) }
     } else { None };
-    if let Some(ref v) = volume { md.insert("Volume", v.clone()); }
+    if let Some(ref v) = volume { md.insert("Volume".to_string(), v.clone()); }
 
     if cfg.verbose {
         let vol_note = if !cfg.use_vol {
@@ -350,17 +330,17 @@ fn process_one(
     if cfg.use_vol_date {
         if let Some(ref v) = volume {
             if let Some((y, m, d)) = find_date(v, &cfg.date_rules) {
-                md.insert("Year",  y.to_string());
-                md.insert("Month", m.to_string());
-                md.insert("Day",   d.to_string());
+                md.insert("Year".to_string(),  y.to_string());
+                md.insert("Month".to_string(), m.to_string());
+                md.insert("Day".to_string(),   d.to_string());
                 date_matched = true;
             }
         }
     } else if let Some(date_str) = cfg.dates_json.get(&orig_num) {
         if let Ok(dt) = chrono::NaiveDate::parse_from_str(date_str, "%b %d, %Y") {
-            md.insert("Year",  dt.year().to_string());
-            md.insert("Month", dt.month().to_string());
-            md.insert("Day",   dt.day().to_string());
+            md.insert("Year".to_string(),  dt.year().to_string());
+            md.insert("Month".to_string(), dt.month().to_string());
+            md.insert("Day".to_string(),   dt.day().to_string());
             date_matched = true;
         }
     }
@@ -380,16 +360,22 @@ fn process_one(
     // Summary from volume-summary rules
     let mut summ_matched = false;
     if mode_str == "chapter" && orig_num == "1" {
-        md.insert("Summary", cfg.summary.clone());
+        md.insert("Summary".to_string(), cfg.summary.clone());
     } else if cfg.use_vol_summ {
         if let Some(ref v) = volume {
             if let Some(s) = find_summary(v, &cfg.summ_rules) {
-                md.insert("Summary", s);
+                md.insert("Summary".to_string(), s);
                 summ_matched = true;
             } else {
-                md.insert("Summary", cfg.summary.clone());
+                md.insert("Summary".to_string(), cfg.summary.clone());
             }
+        } else {
+            // No volume rule matched this chapter at all -- still fall back
+            // to the default rather than leaving Summary unset.
+            md.insert("Summary".to_string(), cfg.summary.clone());
         }
+    } else {
+        md.insert("Summary".to_string(), cfg.summary.clone());
     }
 
     if cfg.verbose {
@@ -405,7 +391,7 @@ fn process_one(
         batch.push((format!("       summary={summ_note}"), LogLevel::Dim));
     }
 
-    let xml_content = build_comic_info_xml(&md, &cfg.custom_fields);
+    let xml_content = build_comic_info_xml(&md);
 
     // ── New filename ──────────────────────────────────────────────────────────
     let safe_t = sanitize_filename(&raw_title);
