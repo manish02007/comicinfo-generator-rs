@@ -54,7 +54,7 @@ pub enum Dialog {
 }
 
 #[derive(Debug, Clone)]
-pub enum PathPick { Folder, ChJson, VolJson, DateJson, LoadConfig, SaveConfig(String), ImportMeta }
+pub enum PathPick { Folder, ChJson, VolJson, DateJson, LoadConfig, SaveConfig(String), ImportMeta, OutputPath }
 
 #[derive(Default, Clone)]
 pub struct DisplayStats {
@@ -138,9 +138,15 @@ impl ComicInfoApp {
     }
     fn load_autosave(&mut self) {
         if let Ok(data) = std::fs::read_to_string(autosave_path()) {
-            if let Ok(cfg) = serde_json::from_str::<AppConfig>(&data) {
+            if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&data) {
+                let loaded_version = cfg.config_version;
+                cfg.config_version = CURRENT_CONFIG_VERSION;
                 self.cfg = cfg;
-                self.status = "Session restored.".to_string();
+                self.status = if loaded_version != CURRENT_CONFIG_VERSION {
+                    "Session restored (from an older app version -- some fields may be reset).".to_string()
+                } else {
+                    "Session restored.".to_string()
+                };
             }
         }
     }
@@ -151,9 +157,35 @@ impl ComicInfoApp {
     }
     fn load_config(&mut self, path: &Path) {
         if let Ok(data) = std::fs::read_to_string(path) {
-            if let Ok(cfg) = serde_json::from_str::<AppConfig>(&data) {
-                self.cfg = cfg; self.rebuild_sep_preview();
-                self.status = format!("Loaded: {}", path.file_name().unwrap_or_default().to_string_lossy());
+            if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&data) {
+                let loaded_version = cfg.config_version;
+                cfg.config_version = CURRENT_CONFIG_VERSION;
+                self.cfg = cfg;
+                self.rebuild_sep_preview();
+                let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                self.status = format!("Loaded: {fname}");
+                // A version mismatch means this config predates (or postdates)
+                // a structural change to AppConfig -- serde's #[serde(default)]
+                // already prevented a hard load failure, but fields that were
+                // renamed/restructured since then won't have carried over.
+                // Surface that explicitly rather than letting it look like
+                // silently "lost" data with no explanation.
+                if loaded_version < CURRENT_CONFIG_VERSION {
+                    self.dialog = Some(Dialog::Notice(format!(
+                        "'{fname}' was saved with an older version of this app \
+                         (config v{loaded_version} vs current v{CURRENT_CONFIG_VERSION}).\n\n\
+                         Some fields may not have carried over if the config \
+                         format changed since then. Worth double-checking the \
+                         Metadata tab before running."
+                    )));
+                } else if loaded_version > CURRENT_CONFIG_VERSION {
+                    self.dialog = Some(Dialog::Notice(format!(
+                        "'{fname}' was saved with a NEWER version of this app \
+                         (config v{loaded_version} vs current v{CURRENT_CONFIG_VERSION}).\n\n\
+                         Some fields may not load correctly. Consider updating \
+                         the app if you run into issues."
+                    )));
+                }
             }
         }
     }
@@ -374,7 +406,7 @@ impl ComicInfoApp {
         let k = kind.clone();
         std::thread::spawn(move || {
             let res = match &k {
-                PathPick::Folder     => rfd::FileDialog::new().pick_folder(),
+                PathPick::Folder | PathPick::OutputPath => rfd::FileDialog::new().pick_folder(),
                 PathPick::ImportMeta |
                 PathPick::ChJson | PathPick::VolJson | PathPick::DateJson =>
                     rfd::FileDialog::new().add_filter("JSON / Python", &["json","py"]).pick_file(),
@@ -410,6 +442,7 @@ impl ComicInfoApp {
                 self.status = format!("Saved: {}", path.file_name().unwrap_or_default().to_string_lossy());
             }
             Some(PathPick::ImportMeta) => self.import_meta(&path),
+            Some(PathPick::OutputPath) => self.cfg.output_path = path.to_string_lossy().into(),
             None => {}
         }
     }
@@ -498,6 +531,9 @@ impl ComicInfoApp {
     ) -> WorkerConfig {
         WorkerConfig {
             dry_run: self.cfg.dry_run,
+            write_new_cbz: self.cfg.write_new_cbz,
+            output_same_path: self.cfg.output_same_path,
+            output_path: self.cfg.output_path.clone(),
             use_vol: self.cfg.use_vol, use_vol_date: self.cfg.use_vol_date, use_vol_summ: self.cfg.use_vol_summ,
             prefix_mode: self.cfg.prefix_mode.as_str().to_string(),
             custom_pfx:  self.cfg.custom_pfx.clone(),
@@ -1189,11 +1225,9 @@ impl ComicInfoApp {
     /// Flat table with header + scrollable rows and row selection.
     fn table(
         ui:      &mut egui::Ui,
-        id:      &str,
         cols:    &[(&str, f32)],
         rows:    &[Vec<String>],
         sel:     &mut Option<usize>,
-        height:  f32,
     ) -> bool { // returns true if a row was double-clicked
         let mut dblclk = false;
         let total_w: f32 = cols.iter().map(|(_,w)| w).sum::<f32>() + 12.0;
@@ -1212,56 +1246,56 @@ impl ComicInfoApp {
             cx += w;
         }
 
-        // Rows
+        // Rows -- rendered directly (no inner ScrollArea). The box's total
+        // height is simply rows.len() * row_h, growing naturally as rows
+        // are added rather than becoming independently scrollable inside a
+        // fixed-size box. The Rules tab's outer page-level ScrollArea
+        // handles any eventual overall overflow instead.
         let last_col = cols.len().saturating_sub(1);
         let fixed_w_except_last: f32 = cols[..last_col].iter().map(|(_, w)| w).sum();
 
-        egui::ScrollArea::vertical()
-            .id_salt(id).max_height(height).auto_shrink([false,false])
-            .show(ui, |ui| {
-                ui.set_min_width(total_w);
-                for (i, row) in rows.iter().enumerate() {
-                    let is_sel = *sel == Some(i);
-                    let bg = if is_sel { theme::ACC } else if i%2==0 { theme::SURF2 } else { theme::ROW_ALT };
-                    let tc = if is_sel { Color32::WHITE } else { theme::TXT };
-                    let row_h = 24.0;
-                    let (rect, resp) = ui.allocate_exact_size(
-                        egui::vec2(ui.available_width().max(total_w), row_h), egui::Sense::click());
-                    if resp.clicked()        { *sel = Some(i); }
-                    if resp.double_clicked() { *sel = Some(i); dblclk = true; }
-                    if ui.is_rect_visible(rect) {
-                        ui.painter().rect_filled(rect, egui::Rounding::ZERO, bg);
-                        // Last column stretches to fill whatever width is left in
-                        // the actual row, instead of being capped at its spec'd
-                        // width while the table sits in a much wider panel.
-                        let stretch_last_w = (rect.width() - 12.0 - fixed_w_except_last)
-                            .max(cols[last_col].1);
-                        let mut cx = rect.left() + 6.0;
-                        for (j, (_, w)) in cols.iter().enumerate() {
-                            let txt = row.get(j).map(|s| s.as_str()).unwrap_or("");
-                            let col_w = if j == last_col { stretch_last_w } else { *w };
-                            // Clip text to column — rect must have positive dims or egui panics
-                            let clip = egui::Rect::from_min_size(
-                                egui::pos2(cx, rect.top()),
-                                egui::vec2((col_w - 4.0).max(1.0), row_h.max(1.0)),
-                            );
-                            ui.painter().with_clip_rect(clip).text(
-                                egui::pos2(cx, rect.center().y),
-                                egui::Align2::LEFT_CENTER, txt,
-                                egui::FontId::new(12.0, egui::FontFamily::Monospace), tc,
-                            );
-                            cx += col_w;
-                        }
-                    }
-                    // Hover over any row to read its full, untruncated last-column
-                    // text (e.g. a long Summary) even if it doesn't fit on screen.
-                    if let Some(full_text) = row.get(last_col) {
-                        if !full_text.is_empty() {
-                            resp.on_hover_text(full_text.as_str());
-                        }
-                    }
+        ui.set_min_width(total_w);
+        for (i, row) in rows.iter().enumerate() {
+            let is_sel = *sel == Some(i);
+            let bg = if is_sel { theme::ACC } else if i%2==0 { theme::SURF2 } else { theme::ROW_ALT };
+            let tc = if is_sel { Color32::WHITE } else { theme::TXT };
+            let row_h = 24.0;
+            let (rect, resp) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width().max(total_w), row_h), egui::Sense::click());
+            if resp.clicked()        { *sel = Some(i); }
+            if resp.double_clicked() { *sel = Some(i); dblclk = true; }
+            if ui.is_rect_visible(rect) {
+                ui.painter().rect_filled(rect, egui::Rounding::ZERO, bg);
+                // Last column stretches to fill whatever width is left in
+                // the actual row, instead of being capped at its spec'd
+                // width while the table sits in a much wider panel.
+                let stretch_last_w = (rect.width() - 12.0 - fixed_w_except_last)
+                    .max(cols[last_col].1);
+                let mut cx = rect.left() + 6.0;
+                for (j, (_, w)) in cols.iter().enumerate() {
+                    let txt = row.get(j).map(|s| s.as_str()).unwrap_or("");
+                    let col_w = if j == last_col { stretch_last_w } else { *w };
+                    // Clip text to column — rect must have positive dims or egui panics
+                    let clip = egui::Rect::from_min_size(
+                        egui::pos2(cx, rect.top()),
+                        egui::vec2((col_w - 4.0).max(1.0), row_h.max(1.0)),
+                    );
+                    ui.painter().with_clip_rect(clip).text(
+                        egui::pos2(cx, rect.center().y),
+                        egui::Align2::LEFT_CENTER, txt,
+                        egui::FontId::new(12.0, egui::FontFamily::Monospace), tc,
+                    );
+                    cx += col_w;
                 }
-            });
+            }
+            // Hover over any row to read its full, untruncated last-column
+            // text (e.g. a long Summary) even if it doesn't fit on screen.
+            if let Some(full_text) = row.get(last_col) {
+                if !full_text.is_empty() {
+                    resp.on_hover_text(full_text.as_str());
+                }
+            }
+        }
         dblclk
     }
 
@@ -1269,11 +1303,9 @@ impl ComicInfoApp {
     fn rule_section(
         ui:     &mut egui::Ui,
         title:  &str,
-        id:     &str,
         cols:   &[(&str, f32)],
         rows:   &mut Vec<Vec<String>>,
         sel:    &mut Option<usize>,
-        height: f32,
         target: RuleTarget,
     ) -> Option<Dialog> {
         let mut pending: Option<Dialog> = None;
@@ -1305,7 +1337,7 @@ impl ComicInfoApp {
                 }
             });
         });
-        let dbl = Self::table(ui, id, cols, rows, sel, height);
+        let dbl = Self::table(ui, cols, rows, sel);
         if dbl {
             if let Some(idx) = *sel {
                 if let Some(row) = rows.get(idx) {
@@ -1382,6 +1414,59 @@ impl ComicInfoApp {
                         Self::open_in_file_manager(&log_path);
                     }
                 });
+            });
+            ui.add_space(14.0);
+
+            theme::card().show(ui, |ui| {
+                theme::section_hdr(ui, "Output Mode");
+                ui.checkbox(&mut self.cfg.write_new_cbz,
+                    RichText::new("Write new CBZ  -  don't overwrite the original file").size(12.0))
+                    .on_hover_text("When off (default), the original .cbz is modified and renamed in place.\nWhen on, a new file is written and the original is left completely untouched.");
+
+                if self.cfg.write_new_cbz {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        ui.radio_value(&mut self.cfg.output_same_path, true, "Same folder as source");
+                        ui.add_space(12.0);
+                        ui.radio_value(&mut self.cfg.output_same_path, false, "Custom folder:");
+                    });
+
+                    if !self.cfg.output_same_path {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            ui.add_sized([108.0, 26.0], egui::Label::new(
+                                RichText::new("Output Folder:").color(theme::TDIM).size(12.0)
+                            ));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(
+                                    egui::Button::new(RichText::new("Browse").size(11.5).color(theme::TXT))
+                                        .fill(theme::SURF3)
+                                        .stroke(egui::Stroke::new(1.0, theme::BDR))
+                                        .rounding(egui::Rounding::same(5.0))
+                                        .min_size(egui::vec2(74.0, 26.0))
+                                ).clicked() {
+                                    self.start_pick(PathPick::OutputPath);
+                                }
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.cfg.output_path)
+                                        .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
+                                        .hint_text("Browse or type a folder path...")
+                                        .desired_width(f32::INFINITY)
+                                ).on_hover_text("New CBZ files are written here instead of the source folder.");
+                            });
+                        });
+                        if self.cfg.output_path.trim().is_empty() {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                ui.label(RichText::new("Choose a folder, or switch back to \"Same folder as source\".")
+                                    .color(theme::TWARN).size(11.0));
+                            });
+                        }
+                    }
+                }
             });
 
                 }); // Frame
@@ -1556,20 +1641,10 @@ impl ComicInfoApp {
                 // ui.horizontal_wrapped() doesn't reliably detect the row
                 // boundary when nested this deep inside Frame/ScrollArea --
                 // content just overflows sideways instead of wrapping. Work
-                // out row breaks manually instead: estimate each field's
-                // rendered width (label text + input box + spacing) and
-                // start a new row whenever the next field wouldn't fit.
-                //
-                // The estimate below is deliberately generous (overestimates
-                // rather than underestimates): selectable_label has its own
-                // internal button-style padding beyond raw text bounds, and
-                // a flat per-character heuristic can't capture that exactly.
-                // If a row's real rendered width comes out even slightly
-                // wider than predicted, the card's Frame grows to match the
-                // overflow -- so a 24px safety margin off avail_w plus
-                // generous per-unit padding ensures rows always fit with
-                // room to spare rather than risking overflow.
-                let avail_w = (ui.available_width() - 24.0).max(100.0);
+                // out row breaks manually instead: measure each field's
+                // actual rendered label width and start a new row whenever
+                // the next field wouldn't fit.
+                let avail_w = (ui.available_width() - 16.0).max(100.0);
                 let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
                 let mut row_w: f32 = 0.0;
                 for &i in &order {
@@ -1577,9 +1652,26 @@ impl ComicInfoApp {
                     let spec      = field_spec(tag);
                     let label_txt = spec.map(|s| s.label).unwrap_or(tag.as_str());
                     let width     = spec.map(|s| s.width).unwrap_or(150.0);
-                    // ~9px/char (covers selectable_label's button padding)
-                    // plus the input box width and a generous fixed gap.
-                    let unit_w = (label_txt.len() as f32 * 9.0) + 16.0 + width + 28.0;
+                    // Measure the actual rendered text width of "Label:" --
+                    // more accurate than a flat per-character heuristic.
+                    let label_w = ui.fonts(|f| {
+                        f.layout_no_wrap(
+                            format!("{label_txt}:"),
+                            egui::FontId::proportional(13.0),
+                            Color32::WHITE,
+                        ).size().x
+                    });
+                    // selectable_label is button-styled: theme sets
+                    // button_padding = (12.0, 6.0), adding 12px on EACH side
+                    // of the text (24px total) -- previously unaccounted
+                    // for, which is exactly why fields overflowed the row.
+                    // item_spacing.x (8.0) is egui's automatic gap inserted
+                    // between every pair of widgets in a horizontal layout;
+                    // one occurs between the label and its input box, and
+                    // another between this unit's input box and the next
+                    // unit's label (no manual ui.add_space() needed for that
+                    // -- removed from the render loop below to match).
+                    let unit_w = 24.0 + label_w + 8.0 + width + 8.0;
                     if row_w + unit_w > avail_w && !rows.last().unwrap().is_empty() {
                         rows.push(Vec::new());
                         row_w = 0.0;
@@ -1644,7 +1736,6 @@ impl ComicInfoApp {
                                         .on_hover_text(tip);
                                 }
                             }
-                            ui.add_space(10.0);
                         }
                     });
                     ui.add_space(4.0);
@@ -1674,18 +1765,10 @@ impl ComicInfoApp {
     }
 
     fn show_rules(&mut self, ui: &mut egui::Ui) {
-        // Divide available height evenly among the 3 rule sections.
-        // Each section header+buttons = ~38px, frame margin = ~24px, gaps = ~20px.
-        let overhead_per_section = 38.0 + 24.0;
-        let total_overhead       = 3.0 * overhead_per_section + 2.0 * 10.0 + 32.0 + 32.0; // gaps + frame margin (16 top + 16 bottom)
-        let table_h = ((ui.available_height() - total_overhead) / 3.0).max(80.0);
-
-        // Outer ScrollArea acts as a safety net: in the common case the 3
-        // tables exactly fill the available height and this scrolls nowhere,
-        // but if table_h's minimum (80px each) ever exceeds what's actually
-        // available -- smaller window, different DPI/font metrics -- content
-        // would otherwise clip with no way to reach it. Every other tab
-        // (Paths/Processing/Metadata) already has this same safety net.
+        // Tables size themselves to their own row count now (see table()),
+        // so there's no need to pre-divide available height among the 3
+        // sections. The outer ScrollArea below is the only safety net
+        // needed if their combined content ever exceeds the visible area.
         egui::ScrollArea::vertical().id_salt("rules_scr").show(ui, |ui| {
         egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(20.0, 16.0))
@@ -1693,25 +1776,25 @@ impl ComicInfoApp {
 
         theme::card().show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
-                ui, "Volume Rules   -   Chapter range -> Volume number", "vr",
+                ui, "Volume Rules   -   Chapter range -> Volume number",
                 &[("Ch Start", 110.0),("Ch End", 110.0),("Volume", 110.0)],
-                &mut self.cfg.volume_rules, &mut self.vol_sel, table_h, RuleTarget::Volume,
+                &mut self.cfg.volume_rules, &mut self.vol_sel, RuleTarget::Volume,
             ) { self.dialog = Some(dlg); }
         });
         ui.add_space(10.0);
         theme::card().show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
-                ui, "Date Rules   -   Volume range -> Publication Date", "dr",
+                ui, "Date Rules   -   Volume range -> Publication Date",
                 &[("Vol Start",90.0),("Vol End",90.0),("Year",70.0),("Month",70.0),("Day",70.0)],
-                &mut self.cfg.date_rules, &mut self.date_sel, table_h, RuleTarget::Date,
+                &mut self.cfg.date_rules, &mut self.date_sel, RuleTarget::Date,
             ) { self.dialog = Some(dlg); }
         });
         ui.add_space(10.0);
         theme::card().show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
-                ui, "Summary Rules   -   Volume range -> Custom Summary", "sr",
+                ui, "Summary Rules   -   Volume range -> Custom Summary",
                 &[("Vol Start",90.0),("Vol End",90.0),("Summary",560.0)],
-                &mut self.cfg.summ_rules, &mut self.summ_sel, table_h, RuleTarget::Summary,
+                &mut self.cfg.summ_rules, &mut self.summ_sel, RuleTarget::Summary,
             ) { self.dialog = Some(dlg); }
         });
 

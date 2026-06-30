@@ -91,20 +91,22 @@ pub fn natural_sort_key(s: &str) -> Vec<String> {
     let mut last = 0usize;
     for m in re_nat_split().find_iter(s) {
         if m.start() > last {
-            result.push(format!("2{}", s[last..m.start()].to_lowercase()));
+            result.push(format!("1{}", s[last..m.start()].to_lowercase()));
         }
         let ns = m.as_str();
-        if ns.contains('.') {
-            let f: f64 = ns.parse().unwrap_or(0.0);
-            result.push(format!("0{:020.6}", f));
-        } else {
-            let i: u64 = ns.parse().unwrap_or(0);
-            result.push(format!("1{:020}", i));
-        }
+        let f: f64 = ns.parse().unwrap_or(0.0);
+        // Single unified numeric encoding regardless of whether the source
+        // token was written as an integer ("2") or a decimal ("2.5").
+        // Previously, decimals used prefix "0" and integers used prefix
+        // "1", which meant EVERY decimal sorted before EVERY integer at
+        // the same position regardless of actual value -- "2.5" sorted
+        // before "2", and even before "100". Encoding both uniformly as
+        // zero-padded fixed-point values compares correctly by magnitude.
+        result.push(format!("0{:020.6}", f));
         last = m.end();
     }
     if last < s.len() {
-        result.push(format!("2{}", s[last..].to_lowercase()));
+        result.push(format!("1{}", s[last..].to_lowercase()));
     }
     result
 }
@@ -332,13 +334,23 @@ pub fn build_comic_info_xml(data: &HashMap<String, String>) -> String {
 }
 
 // ── CBZ write ─────────────────────────────────────────────────────────────────
-pub fn write_comic_info_to_cbz(path: &Path, xml: &str) -> std::io::Result<()> {
+/// Reads `src_path`'s CBZ contents, replaces ComicInfo.xml, and writes the
+/// result to `dest_path`. When `dest_path == src_path` this overwrites the
+/// original in place (the original behavior); when they differ, the source
+/// is left completely untouched and a new file is written at `dest_path`
+/// instead -- used by the "write new CBZ" output mode. Creates `dest_path`'s
+/// parent directory if it doesn't exist yet.
+pub fn write_comic_info_xml_to(src_path: &Path, dest_path: &Path, xml: &str) -> std::io::Result<()> {
     use std::io::{Read, Write};
     use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
-    let tmp = path.with_extension("cbz_tmp");
+    if let Some(parent) = dest_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let tmp = dest_path.with_extension("cbz_tmp");
     {
-        let src = std::fs::File::open(path)?;
+        let src = std::fs::File::open(src_path)?;
         let mut archive = ZipArchive::new(src)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
@@ -363,8 +375,14 @@ pub fn write_comic_info_to_cbz(path: &Path, xml: &str) -> std::io::Result<()> {
         writer.finish()
               .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     }
-    std::fs::rename(&tmp, path)?;
+    std::fs::rename(&tmp, dest_path)?;
     Ok(())
+}
+
+/// In-place overwrite -- thin wrapper around write_comic_info_xml_to for the
+/// default (and previously only) behavior.
+pub fn write_comic_info_to_cbz(path: &Path, xml: &str) -> std::io::Result<()> {
+    write_comic_info_xml_to(path, path, xml)
 }
 
 // ── Safe JSON load (chapter/volume/date title maps) ───────────────────────────
@@ -379,4 +397,333 @@ pub fn safe_json_load(path: &str) -> HashMap<String, String> {
 // ── Separator validity check ──────────────────────────────────────────────────
 pub fn is_sep_invalid_for_filename(sep: &str) -> bool {
     sep.chars().any(|c| matches!(c, ':' | '/' | '\\' | '|' | '?' | '*' | '<' | '>' | '"'))
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+//  Unit tests
+// ═══════════════════════════════════════════════════════════════════════════════
+// The UI has been exercised extensively by hand across many iterations, but
+// the actual parsing/rule-matching logic underneath it -- the part that
+// silently produces wrong output rather than visibly breaking -- has only
+// ever been tested indirectly, by running real batches. These tests target
+// exactly the boundary conditions most likely to harbor an off-by-one or
+// silently-wrong-match bug: range edges, decimal vs. integer ordering, and
+// the auto-detection heuristics.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── detect_file_type ───────────────────────────────────────────────────
+    #[test]
+    fn detect_type_volume_keyword() {
+        assert_eq!(detect_file_type("Volume 3.cbz"), "volume");
+        assert_eq!(detect_file_type("vol 3.cbz"), "volume");
+        assert_eq!(detect_file_type("v3.cbz"), "volume");
+    }
+
+    #[test]
+    fn detect_type_chapter_keyword() {
+        assert_eq!(detect_file_type("Chapter 12.cbz"), "chapter");
+        assert_eq!(detect_file_type("ch 12.cbz"), "chapter");
+    }
+
+    #[test]
+    fn detect_type_episode_keyword() {
+        assert_eq!(detect_file_type("Episode 5.cbz"), "episode");
+        assert_eq!(detect_file_type("ep 5.cbz"), "episode");
+    }
+
+    #[test]
+    fn detect_type_decimal_with_no_keyword_is_chapter() {
+        // No vol/ch/ep keyword, but has a decimal number -- treated as chapter.
+        assert_eq!(detect_file_type("Series 2.5.cbz"), "chapter");
+    }
+
+    #[test]
+    fn detect_type_bare_number_is_chapter() {
+        assert_eq!(detect_file_type("Series 5.cbz"), "chapter");
+    }
+
+    #[test]
+    fn detect_type_no_number_is_unknown() {
+        assert_eq!(detect_file_type("Cover.cbz"), "unknown");
+    }
+
+    #[test]
+    fn detect_type_volume_keyword_takes_priority_over_bare_number() {
+        // Even though "5" alone would be "chapter", the Vol keyword wins.
+        assert_eq!(detect_file_type("My Series Vol 5.cbz"), "volume");
+    }
+
+    // ── is_decimal_file ──────────────────────────────────────────────────────
+    #[test]
+    fn decimal_file_detection() {
+        assert!(is_decimal_file("Episode 2.5.cbz"));
+        assert!(!is_decimal_file("Episode 2.cbz"));
+        assert!(!is_decimal_file("Episode.cbz"));
+    }
+
+    // ── get_prefix ───────────────────────────────────────────────────────────
+    #[test]
+    fn prefix_auto_detects_volume_keyword() {
+        assert_eq!(get_prefix("My Series Vol 5.cbz", "auto", ""), "Volume");
+    }
+
+    #[test]
+    fn prefix_auto_detects_chapter_keyword() {
+        assert_eq!(get_prefix("My Series Ch 5.cbz", "auto", ""), "Chapter");
+    }
+
+    #[test]
+    fn prefix_auto_falls_back_to_episode() {
+        // No vol/ch keyword anywhere in the filename -- defaults to Episode.
+        assert_eq!(get_prefix("My Series 5.cbz", "auto", ""), "Episode");
+    }
+
+    #[test]
+    fn prefix_explicit_modes_override_filename_content() {
+        // Even though the filename says "Vol", explicit mode wins.
+        assert_eq!(get_prefix("My Series Vol 5.cbz", "chapter", ""), "Chapter");
+        assert_eq!(get_prefix("My Series.cbz", "episode", ""), "Episode");
+        assert_eq!(get_prefix("My Series.cbz", "volume", ""), "Volume");
+    }
+
+    #[test]
+    fn prefix_custom_mode_uses_given_text() {
+        assert_eq!(get_prefix("My Series.cbz", "custom", "Break"), "Break");
+    }
+
+    #[test]
+    fn prefix_custom_mode_falls_back_to_episode_if_blank() {
+        assert_eq!(get_prefix("My Series.cbz", "custom", ""), "Episode");
+    }
+
+    // ── find_volume (boundary conditions) ────────────────────────────────────
+    #[test]
+    fn find_volume_matches_within_range() {
+        let rules = vec![
+            vec!["1".into(), "3.5".into(), "1".into()],
+            vec!["4".into(), "8.5".into(), "2".into()],
+        ];
+        assert_eq!(find_volume("1", &rules), Some("1".to_string()));
+        assert_eq!(find_volume("3.5", &rules), Some("1".to_string())); // upper bound inclusive
+        assert_eq!(find_volume("4", &rules), Some("2".to_string()));   // lower bound inclusive
+        assert_eq!(find_volume("8.5", &rules), Some("2".to_string()));
+    }
+
+    #[test]
+    fn find_volume_no_match_outside_all_ranges() {
+        let rules = vec![vec!["1".into(), "3.5".into(), "1".into()]];
+        assert_eq!(find_volume("3.6", &rules), None);
+        assert_eq!(find_volume("100", &rules), None);
+    }
+
+    #[test]
+    fn find_volume_handles_decimal_chapter_inside_range() {
+        let rules = vec![vec!["1".into(), "3.5".into(), "1".into()]];
+        assert_eq!(find_volume("2.5", &rules), Some("1".to_string()));
+    }
+
+    #[test]
+    fn find_volume_invalid_number_returns_none() {
+        let rules = vec![vec!["1".into(), "3.5".into(), "1".into()]];
+        assert_eq!(find_volume("not_a_number", &rules), None);
+    }
+
+    #[test]
+    fn find_volume_malformed_rule_row_is_skipped() {
+        // A row with fewer than 3 columns must not panic -- just skip it.
+        let rules = vec![vec!["1".into(), "2".into()]];
+        assert_eq!(find_volume("1", &rules), None);
+    }
+
+    // ── find_date ─────────────────────────────────────────────────────────────
+    #[test]
+    fn find_date_matches_within_range() {
+        let rules = vec![vec!["1".into(), "1".into(), "2020".into(), "6".into(), "16".into()]];
+        assert_eq!(find_date("1", &rules), Some((2020, 6, 16)));
+    }
+
+    #[test]
+    fn find_date_no_match_returns_none() {
+        let rules = vec![vec!["1".into(), "1".into(), "2020".into(), "6".into(), "16".into()]];
+        assert_eq!(find_date("2", &rules), None);
+    }
+
+    // ── find_summary ──────────────────────────────────────────────────────────
+    #[test]
+    fn find_summary_matches_within_range() {
+        let rules = vec![vec!["1".into(), "3".into(), "Test summary".into()]];
+        assert_eq!(find_summary("2", &rules), Some("Test summary".to_string()));
+    }
+
+    #[test]
+    fn find_summary_no_match_returns_none() {
+        let rules = vec![vec!["1".into(), "3".into(), "Test summary".into()]];
+        assert_eq!(find_summary("4", &rules), None);
+    }
+
+    // ── natural_sort_key ──────────────────────────────────────────────────────
+    #[test]
+    fn natural_sort_orders_numbers_not_lexicographically() {
+        // Plain string sort would put "10" before "2"; natural sort must not.
+        let mut files = vec!["Episode 10.cbz", "Episode 2.cbz", "Episode 1.cbz"];
+        files.sort_by(|a, b| natural_sort_key(a).cmp(&natural_sort_key(b)));
+        assert_eq!(files, vec!["Episode 1.cbz", "Episode 2.cbz", "Episode 10.cbz"]);
+    }
+
+    #[test]
+    fn natural_sort_places_decimal_chapter_between_integers() {
+        let mut files = vec!["Episode 3.cbz", "Episode 2.5.cbz", "Episode 2.cbz"];
+        files.sort_by(|a, b| natural_sort_key(a).cmp(&natural_sort_key(b)));
+        assert_eq!(files, vec!["Episode 2.cbz", "Episode 2.5.cbz", "Episode 3.cbz"]);
+    }
+
+    #[test]
+    fn natural_sort_handles_zero_padded_numbers_equivalently() {
+        // "Episode 02" and "Episode 2" should compare as the same number.
+        let mut files = vec!["Episode 02.cbz", "Episode 1.cbz"];
+        files.sort_by(|a, b| natural_sort_key(a).cmp(&natural_sort_key(b)));
+        assert_eq!(files, vec!["Episode 1.cbz", "Episode 02.cbz"]);
+    }
+
+    // ── sanitize_filename ─────────────────────────────────────────────────────
+    #[test]
+    fn sanitize_strips_filesystem_unsafe_characters() {
+        let result = sanitize_filename(r#"Title: "Quoted" / Slashed * Star?"#);
+        assert!(!result.contains(['/', '*', '?']));
+    }
+
+    #[test]
+    fn sanitize_converts_angle_brackets_to_parens() {
+        let result = sanitize_filename("Title <bracketed>");
+        assert_eq!(result, "Title (bracketed)");
+    }
+
+    #[test]
+    fn sanitize_collapses_repeated_spaces() {
+        let result = sanitize_filename("Too    many     spaces");
+        assert!(!result.contains("  "));
+    }
+
+    #[test]
+    fn sanitize_trims_trailing_dot_and_whitespace() {
+        let result = sanitize_filename("Trailing dot.   ");
+        assert!(!result.ends_with('.'));
+        assert!(!result.ends_with(' '));
+    }
+
+    // ── extract_title_from_filename ───────────────────────────────────────────
+    #[test]
+    fn extract_title_from_episode_pattern() {
+        assert_eq!(
+            extract_title_from_filename("Episode 5 - My Cool Title.cbz"),
+            Some("My Cool Title".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_title_from_chapter_colon_pattern() {
+        assert_eq!(
+            extract_title_from_filename("Chapter 12: The Reckoning.cbz"),
+            Some("The Reckoning".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_title_returns_none_without_a_title_part() {
+        assert_eq!(extract_title_from_filename("Episode 5.cbz"), None);
+    }
+
+    // ── is_sep_invalid_for_filename ────────────────────────────────────────────
+    #[test]
+    fn separator_validity() {
+        assert!(is_sep_invalid_for_filename(":"));
+        assert!(is_sep_invalid_for_filename("/"));
+        assert!(!is_sep_invalid_for_filename("-"));
+        assert!(!is_sep_invalid_for_filename("~"));
+    }
+
+    // ── ComicInfo schema registry ─────────────────────────────────────────────
+    #[test]
+    fn canonical_order_known_tags_come_before_unknown() {
+        assert!(canonical_index("Series") < canonical_index("Writer"));
+        assert_eq!(canonical_index("NotARealTag"), usize::MAX);
+    }
+
+    #[test]
+    fn field_spec_lookup_finds_known_tags() {
+        assert!(field_spec("Series").is_some());
+        assert!(field_spec("CommunityRating").is_some());
+        assert!(field_spec("NotARealTag").is_none());
+    }
+
+    #[test]
+    fn every_canonical_order_entry_except_per_file_fields_has_a_spec() {
+        // Title/Number/Volume/Summary are deliberately excluded from
+        // COMICINFO_FIELDS (computed per-file or handled separately) --
+        // every other canonical tag must have a real FieldSpec, or the
+        // Add Tag picker can never offer it (this caught a real bug once:
+        // "Count" existed in CANONICAL_ORDER but had no FieldSpec entry).
+        let excluded = ["Title", "Number", "Volume", "Summary"];
+        for &tag in CANONICAL_ORDER {
+            if excluded.contains(&tag) { continue; }
+            assert!(field_spec(tag).is_some(), "tag '{tag}' is in CANONICAL_ORDER but missing from COMICINFO_FIELDS");
+        }
+    }
+
+    #[test]
+    fn every_comicinfo_field_has_a_canonical_position() {
+        for spec in COMICINFO_FIELDS {
+            assert_ne!(
+                canonical_index(spec.tag), usize::MAX,
+                "tag '{}' is in COMICINFO_FIELDS but missing from CANONICAL_ORDER", spec.tag
+            );
+        }
+    }
+
+    // ── build_comic_info_xml ──────────────────────────────────────────────────
+    #[test]
+    fn xml_builder_escapes_special_characters() {
+        let mut data = HashMap::new();
+        data.insert("Series".to_string(), "Tom & Jerry's \"Big\" Day <2>".to_string());
+        let xml = build_comic_info_xml(&data);
+        assert!(xml.contains("&amp;"));
+        assert!(xml.contains("&apos;"));
+        assert!(xml.contains("&quot;"));
+        assert!(xml.contains("&lt;2&gt;"));
+        assert!(!xml.contains("Tom & Jerry")); // raw & must not survive unescaped
+    }
+
+    #[test]
+    fn xml_builder_omits_empty_volume_tag() {
+        let mut data = HashMap::new();
+        data.insert("Title".to_string(), "Episode 1".to_string());
+        data.insert("Volume".to_string(), "".to_string());
+        let xml = build_comic_info_xml(&data);
+        assert!(!xml.contains("<Volume>"));
+    }
+
+    #[test]
+    fn xml_builder_sorts_into_canonical_order_regardless_of_insertion_order() {
+        // Insert Writer before Series -- output must still have Series first,
+        // matching the schema sequence, not insertion order.
+        let mut data = HashMap::new();
+        data.insert("Writer".to_string(), "A".to_string());
+        data.insert("Series".to_string(), "B".to_string());
+        let xml = build_comic_info_xml(&data);
+        let series_pos = xml.find("<Series>").unwrap();
+        let writer_pos  = xml.find("<Writer>").unwrap();
+        assert!(series_pos < writer_pos);
+    }
+
+    #[test]
+    fn xml_builder_only_emits_tags_actually_present() {
+        let mut data = HashMap::new();
+        data.insert("Series".to_string(), "Only This".to_string());
+        let xml = build_comic_info_xml(&data);
+        assert!(xml.contains("<Series>"));
+        assert!(!xml.contains("<Writer>"));
+        assert!(!xml.contains("<Genre>"));
+    }
 }

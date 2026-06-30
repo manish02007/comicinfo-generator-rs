@@ -26,10 +26,22 @@ pub enum PostFinale { #[default] Strip, Keep }
 #[serde(rename_all = "lowercase")]
 pub enum ComicMode { #[default] Manga, Manhwa }
 
+// ── Config versioning ──────────────────────────────────────────────────────────
+// Bumped whenever AppConfig's structure changes in a way that breaks loading
+// older saved configs (renamed/removed/restructured fields). Lets load_config
+// detect and warn about a mismatch instead of silently dropping data with no
+// explanation -- which is exactly what happened when the fixed metadata
+// fields were replaced with the dynamic metadata_fields list.
+pub const CURRENT_CONFIG_VERSION: u32 = 1;
+
 // ── Main config (serialised to autosave + user config files) ─────────────────
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
+    // Bumped to CURRENT_CONFIG_VERSION on save. A loaded config with a lower
+    // (or missing -- defaults to 0) version predates some structural change;
+    // app.rs's load_config/load_autosave check this and warn accordingly.
+    pub config_version: u32,
     // Paths
     pub folder:   String,
     pub ch_json:  String,
@@ -38,6 +50,14 @@ pub struct AppConfig {
     // Config
     pub workers: usize,
     pub dry_run: bool,
+    // Output mode: overwrite the original CBZ in place (default, matches
+    // every previous version of this app) vs. write a new CBZ and leave the
+    // original untouched.
+    pub write_new_cbz:    bool,
+    // When write_new_cbz is on: true = new files go in the same folder as
+    // the source; false = new files go to output_path instead.
+    pub output_same_path: bool,
+    pub output_path:      String,
     // Mode
     pub mode: ComicMode,
     // Volume metadata
@@ -73,9 +93,11 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            config_version: CURRENT_CONFIG_VERSION,
             folder: String::new(), ch_json: String::new(),
             vol_json: String::new(), date_json: String::new(),
             workers: 4, dry_run: false,
+            write_new_cbz: false, output_same_path: true, output_path: String::new(),
             mode: ComicMode::Manga,
             use_vol: true, use_vol_date: true, use_vol_summ: true,
             prefix_mode: PrefixMode::Auto,
@@ -114,6 +136,34 @@ impl Default for AppConfig {
                 vec!["3".into(),"3".into(),"2021".into(),"6".into(),  "1".into()],
             ],
             summ_rules: Vec::new(),
+        }
+    }
+}
+
+// ── App-wide settings (separate from AppConfig / per-job Save-Load-Config) ───
+// These persist across all jobs/series, independently of whatever job config
+// is currently loaded. Kept deliberately apart from AppConfig: if backup-
+// before-overwrite lived in AppConfig instead, loading a different series'
+// saved config would silently flip your global safety preference along with
+// it -- a toggle like that should only ever change because you changed it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AppSettings {
+    // Before overwriting a CBZ in place (write_new_cbz off), copy the
+    // untouched original to a "backups" subfolder first. Protects against a
+    // bad rule or typo silently destroying every file in a batch -- the
+    // worst-case failure mode of the default (overwrite-in-place) mode.
+    pub backup_before_overwrite: bool,
+    // Play a short system sound when a batch run finishes. Useful for long
+    // unattended runs where the app isn't the focused window.
+    pub play_sound_on_completion: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            backup_before_overwrite: true,   // safety feature: on by default
+            play_sound_on_completion: true,  // convenience feature: on by default, easy to disable if noisy
         }
     }
 }

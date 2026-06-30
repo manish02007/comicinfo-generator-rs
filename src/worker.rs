@@ -42,6 +42,13 @@ pub enum UiMsg {
 // ── Runtime config (owned by worker thread) ───────────────────────────────────
 pub struct WorkerConfig {
     pub dry_run:          bool,
+    // Output mode: false (default) overwrites the original in place; true
+    // writes a new file instead and leaves the original completely
+    // untouched. output_same_path/output_path determine the destination
+    // folder when write_new_cbz is on.
+    pub write_new_cbz:    bool,
+    pub output_same_path: bool,
+    pub output_path:      String,
     pub use_vol:          bool,
     pub use_vol_date:     bool,
     pub use_vol_summ:     bool,
@@ -405,7 +412,21 @@ fn process_one(
     } else {
         format!("{base}{fname_sep}{safe_t}.cbz")
     };
-    let new_path = path.parent().unwrap_or(Path::new(".")).join(&new_name);
+
+    // Destination differs by output mode:
+    // - default (write_new_cbz=false): same folder as the source, then
+    //   renamed in place after writing -- unchanged from every previous
+    //   version of this app.
+    // - write_new_cbz=true: either the same folder (output_same_path) or a
+    //   user-chosen custom folder (output_path). The file is written
+    //   DIRECTLY to its final title-based name at that destination in one
+    //   step; the source file is never touched, renamed, or modified.
+    let output_dir = if cfg.write_new_cbz && !cfg.output_same_path {
+        PathBuf::from(&cfg.output_path)
+    } else {
+        path.parent().unwrap_or(Path::new(".")).to_path_buf()
+    };
+    let new_path = output_dir.join(&new_name);
     // counter computed after bump_done (see below)
 
     // ── Write / Dry-run ───────────────────────────────────────────────────────
@@ -417,13 +438,36 @@ fn process_one(
         // list -- consistent with how blocks are now rendered in sort order,
         // rather than jumping around based on which thread finished first.
         let _pos = bump_done(tx, done_c, total, stats);
+        let dest_note = if cfg.write_new_cbz {
+            format!("{}", new_path.display())
+        } else {
+            new_name.clone()
+        };
         let mut result = vec![
-            (format!("  [DRY] [{}/{total}]  {file}  ->  {new_name}", file_idx + 1), LogLevel::Warn),
+            (format!("  [DRY] [{}/{total}]  {file}  ->  {dest_note}", file_idx + 1), LogLevel::Warn),
             (format!("           XML title: {xml_title}"), LogLevel::Dim),
         ];
         result.extend(batch);
         flush_batch(tx, file_idx, result);
         return;
+    } else if cfg.write_new_cbz {
+        // Write directly to the final destination with its correct name in
+        // one step. The source file is never opened for writing, renamed,
+        // or modified in any way.
+        match write_comic_info_xml_to(path, &new_path, &xml_content) {
+            Ok(()) => { stats.lock().unwrap().xml_updated += 1; }
+            Err(e) => {
+                let msg = format!("  [ERR] {file}  -  {e}");
+                let mut result = vec![(msg.clone(), LogLevel::Err)];
+                result.extend(batch);
+                flush_batch(tx, file_idx, result);
+                append_error_log(&cfg.error_log_file, &msg, header_written, run_ts);
+                stats.lock().unwrap().errors += 1;
+                bump_done(tx, done_c, total, stats);
+                return;
+            }
+        }
+        mark_done(&cfg.progress_file, &file);
     } else {
         match write_comic_info_to_cbz(path, &xml_content) {
             Ok(()) => { stats.lock().unwrap().xml_updated += 1; }
