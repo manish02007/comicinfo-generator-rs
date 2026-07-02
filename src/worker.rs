@@ -69,6 +69,10 @@ pub struct WorkerConfig {
     // Built from AppConfig::metadata_fields; the exact set of tags present
     // is entirely user-chosen via Add Tag / Remove in the Metadata tab.
     pub metadata_fields:  HashMap<String, String>,
+    // CommunityRating is authored 0-10 (matches AppConfig::community_
+    // rating_10_scale) and converted to the schema's real 0-5 scale once,
+    // right when metadata_fields is turned into the per-file dict below.
+    pub community_rating_10_scale: bool,
     pub summary:          String,
     pub volume_rules:     Vec<Vec<String>>,
     pub date_rules:       Vec<Vec<String>>,
@@ -342,6 +346,13 @@ fn process_one(
     // Summary on top -- those four are always computed by this app's own
     // logic, never part of the user-editable constant set.
     let mut md: HashMap<String, String> = cfg.metadata_fields.clone();
+    if cfg.community_rating_10_scale {
+        if let Some(v) = md.get_mut("CommunityRating") {
+            if let Ok(n) = v.parse::<f64>() {
+                *v = format!("{:.1}", (n / 10.0 * 5.0).clamp(0.0, 5.0));
+            }
+        }
+    }
     md.insert("Title".to_string(),  xml_title.clone());
     md.insert("Number".to_string(), number.clone());
 

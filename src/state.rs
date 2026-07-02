@@ -81,6 +81,12 @@ pub struct AppConfig {
     // Choosable from the full ComicInfo v2.1 field list via "Add Tag" in the
     // Metadata tab -- see processing::COMICINFO_FIELDS.
     pub metadata_fields: Vec<(String, String)>,
+    // CommunityRating is fixed at 0-5 in the ComicInfo schema, but most
+    // community sites (MAL, AniList, ...) rate out of 10. When on, the
+    // Metadata tab's CommunityRating box accepts 0-10 instead of 0-5, and
+    // the value is converted (rating/10*5) once, at XML-write time --
+    // what's stored/shown in the box is always exactly what was typed.
+    pub community_rating_10_scale: bool,
     // Summary is kept separate from metadata_fields: it has its own
     // dedicated multi-line UI and chapter-1/fallback override logic.
     pub summary: String,
@@ -124,6 +130,7 @@ impl Default for AppConfig {
                 ("Count".to_string(),           String::new()),
                 ("Web".to_string(),              String::new()),
             ],
+            community_rating_10_scale: false,
             summary: String::new(),
             volume_rules: vec![
                 vec!["1".into(),  "3.5".into(), "1".into()],

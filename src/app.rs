@@ -607,6 +607,7 @@ impl ComicInfoApp {
             use_csep: self.cfg.csep_on, csep: self.cfg.csep.clone(),
             zero_pad: self.cfg.zero_pad, pad_width: self.cfg.pad_width,
             metadata_fields: self.cfg.metadata_fields.iter().cloned().collect(),
+            community_rating_10_scale: self.cfg.community_rating_10_scale,
             summary: self.cfg.summary.clone(),
             volume_rules:  self.cfg.volume_rules.clone(),
             date_rules:    self.cfg.date_rules.clone(),
@@ -1813,7 +1814,20 @@ impl ComicInfoApp {
                                     r.on_hover_text(tip);
                                 }
                                 Some(FieldKind::Decimal { min, max }) => {
-                                    let r = ui.add(egui::TextEdit::singleline(val).desired_width(width));
+                                    // CommunityRating's box accepts 0-10 instead of the
+                                    // schema's real 0-5 when the user opts into rating on
+                                    // a MAL/AniList-style 10 scale -- conversion happens
+                                    // once, at XML-write time, not here (see worker.rs).
+                                    let (min, max) = if tag.as_str() == "CommunityRating"
+                                        && self.cfg.community_rating_10_scale
+                                    {
+                                        (0.0, 10.0)
+                                    } else {
+                                        (min, max)
+                                    };
+                                    let r = ui.add(egui::TextEdit::singleline(val)
+                                        .desired_width(width)
+                                        .hint_text(format!("{min:.0}-{max:.0}")));
                                     if r.changed() {
                                         let mut seen_dot = false;
                                         *val = val.chars().filter(|&c| {
@@ -1849,6 +1863,21 @@ impl ComicInfoApp {
                         }
                     });
                     ui.add_space(4.0);
+                }
+
+                // Outside the measured-width grid above on purpose: this
+                // toggle's width isn't accounted for in that grid's row-
+                // wrapping math, and folding it in risks the exact overflow
+                // bugs that math was written to fix.
+                if self.cfg.metadata_fields.iter().any(|(t, _)| t == "CommunityRating") {
+                    ui.add_space(2.0);
+                    ui.checkbox(&mut self.cfg.community_rating_10_scale,
+                        RichText::new("Rate Community Rating on a 1-10 scale (auto-converted to 0-5 in the XML)")
+                            .size(11.0).color(theme::TDIM))
+                        .on_hover_text(
+                            "Enter your rating as given -- e.g. a MyAnimeList or AniList \
+                             score out of 10. It's written to ComicInfo.xml as rating/10*5, \
+                             matching the field's real 0-5 scale.");
                 }
 
                 self.meta_field_sel = new_sel;
