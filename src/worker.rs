@@ -262,17 +262,36 @@ fn process_one(
         ), LogLevel::Dim));
     }
 
-    // Title lookup
+    // Title lookup: only a non-empty value from chapter_titles.json /
+    // volume_titles.json counts as a reliable title. With no titles file at
+    // all (or an empty one), or this specific chapter/volume missing or
+    // blank in it, the app makes no attempt to guess a title from the
+    // filename -- the "New filename" step below keeps the original name
+    // untouched (sanitized only), and ComicInfo.xml's Title falls back to
+    // the plain "{prefix} {number}" base text.
     let titles = if mode_str == "volume" { &cfg.volume_titles } else { &cfg.chapter_titles };
+    let titles_kind = if mode_str == "volume" { "volume_titles.json" } else { "chapter_titles.json" };
+    let json_entry = titles.get(&orig_num).or_else(|| titles.get(&number));
+    let has_reliable_title = json_entry.map_or(false, |t| !t.is_empty());
+
+    // Only warn when a titles file was actually configured (the map has
+    // *some* entries) -- running with no titles file at all is the
+    // expected, silent default, not something worth flagging per file.
+    if !titles.is_empty() && !has_reliable_title {
+        let reason = if json_entry.is_some() { "empty title" } else { "no entry" };
+        let msg = format!(
+            "  [WARN] {file}  -  {reason} for \"{orig_num}\" in {titles_kind}, using filename as-is"
+        );
+        batch.push((msg.clone(), LogLevel::Warn));
+        append_error_log(&cfg.error_log_file, &msg, header_written, run_ts);
+    }
+
     let title_source: &str;
-    let raw_title: String = if let Some(t) = titles.get(&orig_num).or_else(|| titles.get(&number)) {
-        title_source = if mode_str == "volume" { "volume_titles.json" } else { "chapter_titles.json" };
-        t.clone()
-    } else if let Some(t) = extract_title_from_filename(&file) {
-        title_source = "extracted from filename";
-        t
+    let raw_title: String = if has_reliable_title {
+        title_source = titles_kind;
+        json_entry.unwrap().clone()
     } else {
-        title_source = "fallback (no title found)";
+        title_source = "fallback -- no reliable title in json";
         base.clone()
     };
 
@@ -407,16 +426,21 @@ fn process_one(
     let xml_content = build_comic_info_xml(&md);
 
     // ── New filename ──────────────────────────────────────────────────────────
-    let safe_t = sanitize_filename(&raw_title);
-    let fname_sep = if cfg.use_csep && !invalid_sep {
-        format!(" {} ", cfg.csep.trim())
-    } else {
-        " - ".to_string()
-    };
-    let new_name = if raw_title == base {
-        format!("{base}.cbz")
-    } else {
+    let new_name = if has_reliable_title {
+        let safe_t = sanitize_filename(&raw_title);
+        let fname_sep = if cfg.use_csep && !invalid_sep {
+            format!(" {} ", cfg.csep.trim())
+        } else {
+            " - ".to_string()
+        };
         format!("{base}{fname_sep}{safe_t}.cbz")
+    } else {
+        // No reliable title: keep the original filename exactly as given,
+        // only sanitizing characters the filesystem can't store. No
+        // prefix/number/separator reconstruction here at all -- that
+        // guessing is exactly what points 1/2 asked to remove.
+        let orig_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(file.as_str());
+        format!("{}.cbz", sanitize_filename(orig_stem))
     };
 
     // Destination differs by output mode:
