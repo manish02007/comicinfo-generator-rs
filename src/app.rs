@@ -9,6 +9,47 @@ fn autosave_path() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".comicinfo_autosave.json")
 }
 
+// ── App settings (separate file from autosave/per-job configs) ───────────────
+fn settings_path() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".comicinfo_settings.json")
+}
+
+// Best-effort, dependency-free notification sound for AppSettings::
+// play_sound_on_completion: shells out to whatever each OS already ships
+// rather than pulling in an audio-playback crate to make one beep.
+// Fire-and-forget -- a missing player on an unusual setup just means
+// silence, never a blocked UI thread or a visible error.
+fn play_completion_sound() {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("rundll32")
+            .arg("user32.dll,MessageBeep")
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("afplay")
+            .arg("/System/Library/Sounds/Glass.aiff")
+            .spawn();
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Try common players in order; the first that exists wins. Neither
+        // existing is equally likely across distros, but a silent no-op if
+        // neither is present is fine -- this is a convenience feature,
+        // never worth failing a run over.
+        let candidates: [(&str, &[&str]); 2] = [
+            ("canberra-gtk-play", &["-i", "complete"]),
+            ("paplay", &["/usr/share/sounds/freedesktop/stereo/complete.oga"]),
+        ];
+        for (cmd, args) in candidates {
+            if std::process::Command::new(cmd).args(args).spawn().is_ok() {
+                break;
+            }
+        }
+    }
+}
+
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 #[derive(Clone, Copy, PartialEq, Default)]
 pub enum Tab { #[default] Paths, Processing, Metadata, Rules, Run }
@@ -69,6 +110,10 @@ pub struct ComicInfoApp {
     pub sep_preview: String,
     pub status:      String,
     pub verbose:     bool,
+    // App-wide settings (backup-before-overwrite, completion sound) --
+    // persisted separately from AppConfig, see state.rs::AppSettings.
+    pub settings:      AppSettings,
+    pub settings_open: bool,
     // Table selection
     pub vol_sel:  Option<usize>,
     pub date_sel: Option<usize>,
@@ -111,6 +156,8 @@ impl ComicInfoApp {
             sep_preview: String::new(),
             status:      "Ready.".to_string(),
             verbose:     false,
+            settings:      AppSettings::default(),
+            settings_open: false,
             vol_sel:     None, date_sel: None, summ_sel: None, meta_field_sel: None,
             dialog:      None,
             pick_kind:   None, pick_rx: None,
@@ -126,8 +173,23 @@ impl ComicInfoApp {
             last_save:   std::time::Instant::now(),
         };
         app.load_autosave();
+        app.load_settings();
         app.rebuild_sep_preview();
         app
+    }
+
+    // ── Settings (persisted separately from AppConfig / per-job configs) ──────
+    fn save_settings(&self) {
+        if let Ok(s) = serde_json::to_string_pretty(&self.settings) {
+            let _ = std::fs::write(settings_path(), s);
+        }
+    }
+    fn load_settings(&mut self) {
+        if let Ok(data) = std::fs::read_to_string(settings_path()) {
+            if let Ok(settings) = serde_json::from_str::<AppSettings>(&data) {
+                self.settings = settings;
+            }
+        }
     }
 
     // ── Autosave ──────────────────────────────────────────────────────────────
@@ -491,6 +553,9 @@ impl ComicInfoApp {
                 }
                 Ok(WorkerMsg::Done { stats }) => {
                     self.running = false;
+                    if self.settings.play_sound_on_completion {
+                        play_completion_sound();
+                    }
                     self.disp_stats = DisplayStats {
                         total: stats.total, processed: stats.processed,
                         renamed: stats.renamed, skipped: stats.rename_skipped,
@@ -534,6 +599,7 @@ impl ComicInfoApp {
             write_new_cbz: self.cfg.write_new_cbz,
             output_same_path: self.cfg.output_same_path,
             output_path: self.cfg.output_path.clone(),
+            backup_before_overwrite: self.settings.backup_before_overwrite,
             use_vol: self.cfg.use_vol, use_vol_date: self.cfg.use_vol_date, use_vol_summ: self.cfg.use_vol_summ,
             prefix_mode: self.cfg.prefix_mode.as_str().to_string(),
             custom_pfx:  self.cfg.custom_pfx.clone(),
@@ -1079,6 +1145,7 @@ impl eframe::App for ComicInfoApp {
         self.poll_pick();
         self.poll_worker(ctx);
         self.render_dialogs(ctx);
+        self.show_settings_window(ctx);
 
         // Vertical margins are kept EQUAL (top == bottom) on every bar so the
         // panel sizes itself naturally around its content and that content
@@ -1121,6 +1188,10 @@ impl ComicInfoApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
+                if ui.add(theme::btn_secondary("\u{2699} Settings")).on_hover_text("App settings").clicked() {
+                    self.settings_open = true;
+                }
+                ui.add_space(10.0);
                 if ui.add(theme::btn_danger("Reset All")).on_hover_text("Clear all settings (Ctrl+R)").clicked() {
                     self.dialog = Some(Dialog::ConfirmReset);
                 }
@@ -1184,6 +1255,45 @@ impl ComicInfoApp {
                 ).clicked() { self.tab = tab; }
             }
         });
+    }
+
+    // Floating window (not a 6th tab, deliberately) for app-wide preferences
+    // that apply across every job/series rather than belonging to a single
+    // saved config. Non-modal and independent of the Dialog enum so it can
+    // stay open (or be dismissed) without interrupting anything else --
+    // each toggle saves to disk immediately on change, no separate Save
+    // button, since there's nothing here worth risking losing on a crash.
+    fn show_settings_window(&mut self, ctx: &egui::Context) {
+        if !self.settings_open { return; }
+        let mut open = true;
+        egui::Window::new("Settings")
+            .open(&mut open)
+            .resizable(false)
+            .collapsible(false)
+            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
+            .show(ctx, |ui| {
+                ui.set_min_width(280.0);
+                theme::section_hdr(ui, "Safety");
+                if ui.checkbox(&mut self.settings.backup_before_overwrite,
+                    RichText::new("Back up originals before overwriting").size(12.0))
+                    .on_hover_text(
+                        "Copies each CBZ to a \"backups\" subfolder next to it \
+                         before modifying it in place. Only applies when \
+                         \"Write new CBZ\" (Paths tab) is off.")
+                    .changed()
+                {
+                    self.save_settings();
+                }
+                ui.add_space(10.0);
+                theme::section_hdr(ui, "Notifications");
+                if ui.checkbox(&mut self.settings.play_sound_on_completion,
+                    RichText::new("Play a sound when a run finishes").size(12.0))
+                    .changed()
+                {
+                    self.save_settings();
+                }
+            });
+        self.settings_open = open;
     }
 }
 

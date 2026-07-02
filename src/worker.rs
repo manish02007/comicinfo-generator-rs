@@ -49,6 +49,12 @@ pub struct WorkerConfig {
     pub write_new_cbz:    bool,
     pub output_same_path: bool,
     pub output_path:      String,
+    // Before overwriting a CBZ in place (only relevant when write_new_cbz is
+    // off, since write_new_cbz never touches the original at all), copy the
+    // untouched original into a "backups" subfolder first. Mirrors
+    // AppSettings::backup_before_overwrite -- see state.rs for why this
+    // lives outside AppConfig.
+    pub backup_before_overwrite: bool,
     pub use_vol:          bool,
     pub use_vol_date:     bool,
     pub use_vol_summ:     bool,
@@ -469,6 +475,28 @@ fn process_one(
         }
         mark_done(&cfg.progress_file, &file);
     } else {
+        // Backup-before-overwrite: copy the still-untouched original into a
+        // "backups" subfolder beside it before doing anything destructive.
+        // This is a safety net the user explicitly opted into, so a failed
+        // backup skips the file as an error rather than silently
+        // overwriting without it -- fixing the "safety" toggle to actually
+        // fail closed instead of quietly no-op'ing on a copy error.
+        if cfg.backup_before_overwrite {
+            let backup_dir  = path.parent().unwrap_or(Path::new(".")).join("backups");
+            let backup_path = backup_dir.join(&file);
+            if let Err(e) = std::fs::create_dir_all(&backup_dir)
+                .and_then(|_| std::fs::copy(path, &backup_path).map(|_| ()))
+            {
+                let msg = format!("  [ERR] {file}  -  backup failed, skipped: {e}");
+                let mut result = vec![(msg.clone(), LogLevel::Err)];
+                result.extend(batch);
+                flush_batch(tx, file_idx, result);
+                append_error_log(&cfg.error_log_file, &msg, header_written, run_ts);
+                stats.lock().unwrap().errors += 1;
+                bump_done(tx, done_c, total, stats);
+                return;
+            }
+        }
         match write_comic_info_to_cbz(path, &xml_content) {
             Ok(()) => { stats.lock().unwrap().xml_updated += 1; }
             Err(e) => {
