@@ -262,13 +262,21 @@ fn process_one(
         ), LogLevel::Dim));
     }
 
+    // Original filename text (no extension), sanitized for filesystem
+    // safety. Used as the fallback for BOTH the new filename and the XML
+    // Title below when there's no reliable JSON title -- so the two always
+    // agree instead of Title silently reverting to a bare "{prefix}
+    // {number}" while the filename keeps whatever descriptive text the
+    // original name had.
+    let orig_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(file.as_str());
+    let orig_stem_safe = sanitize_filename(orig_stem);
+
     // Title lookup: only a non-empty value from chapter_titles.json /
     // volume_titles.json counts as a reliable title. With no titles file at
     // all (or an empty one), or this specific chapter/volume missing or
     // blank in it, the app makes no attempt to guess a title from the
     // filename -- the "New filename" step below keeps the original name
-    // untouched (sanitized only), and ComicInfo.xml's Title falls back to
-    // the plain "{prefix} {number}" base text.
+    // untouched (sanitized only), and ComicInfo.xml's Title matches it.
     let titles = if mode_str == "volume" { &cfg.volume_titles } else { &cfg.chapter_titles };
     let titles_kind = if mode_str == "volume" { "volume_titles.json" } else { "chapter_titles.json" };
     let json_entry = titles.get(&orig_num).or_else(|| titles.get(&number));
@@ -291,8 +299,8 @@ fn process_one(
         title_source = titles_kind;
         json_entry.unwrap().clone()
     } else {
-        title_source = "fallback -- no reliable title in json";
-        base.clone()
+        title_source = "fallback -- using original filename as title";
+        orig_stem_safe.clone()
     };
 
     if cfg.verbose {
@@ -325,7 +333,7 @@ fn process_one(
     // ── Build XML title ───────────────────────────────────────────────────────
     let xml_title = build_xml_title(
         &orig_num, &number, &base, &sep, &labelled_title, &raw_title,
-        mode_str, is_decimal, after_finale, cfg,
+        mode_str, is_decimal, after_finale, has_reliable_title, cfg,
     );
 
     // ── Metadata dict ─────────────────────────────────────────────────────────
@@ -439,8 +447,7 @@ fn process_one(
         // only sanitizing characters the filesystem can't store. No
         // prefix/number/separator reconstruction here at all -- that
         // guessing is exactly what points 1/2 asked to remove.
-        let orig_stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(file.as_str());
-        format!("{}.cbz", sanitize_filename(orig_stem))
+        format!("{orig_stem_safe}.cbz")
     };
 
     // Destination differs by output mode:
@@ -584,6 +591,7 @@ fn build_xml_title(
     mode:         &str,
     is_decimal:   bool,
     after_finale: bool,
+    has_reliable_title: bool,
     cfg:          &WorkerConfig,
 ) -> String {
     // Special: ch 0 = keep raw title
@@ -614,8 +622,12 @@ fn build_xml_title(
         return labelled.to_string();
     }
 
-    // No title beyond the base → keep base
-    if raw_title == base { return base.to_string(); }
+    // No reliable title (no titles file, or this entry missing/blank in
+    // one) → raw_title is already the sanitized original filename text (or
+    // the bare base, if the filename had nothing beyond the number/prefix)
+    // -- use it directly rather than gluing base+sep+labelled together,
+    // which would double up anything already present in raw_title.
+    if !has_reliable_title { return raw_title.to_string(); }
 
     // Normal: "Episode N - Title"
     format!("{base}{sep}{labelled}")
