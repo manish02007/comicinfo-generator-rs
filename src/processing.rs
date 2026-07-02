@@ -11,7 +11,7 @@ fn re_episode()  -> &'static Regex { static R: OnceLock<Regex> = OnceLock::new()
 fn re_decimal()  -> &'static Regex { static R: OnceLock<Regex> = OnceLock::new(); R.get_or_init(|| Regex::new(r"\d+\.\d+").unwrap()) }
 fn re_anynum()   -> &'static Regex { static R: OnceLock<Regex> = OnceLock::new(); R.get_or_init(|| Regex::new(r"\d+(?:\.\d+)?").unwrap()) }
 fn re_intonly()  -> &'static Regex { static R: OnceLock<Regex> = OnceLock::new(); R.get_or_init(|| Regex::new(r"\b\d+\b").unwrap()) }
-fn re_title()    -> &'static Regex { static R: OnceLock<Regex> = OnceLock::new(); R.get_or_init(|| Regex::new(r"(?i)^(?:Ep\.?|Episode|Ch\.?|Chapter|Vol\.?|Volume)\s*\d+(?:\.\d+)?\s*[-:]\s*(.+)").unwrap()) }
+fn re_title()    -> &'static Regex { static R: OnceLock<Regex> = OnceLock::new(); R.get_or_init(|| Regex::new(r"(?i)^(?:Ep\.?|Episode|Ch\.?|Chapter|Vol\.?|Volume)\s*\d+(?:\.\d+)?\s*(?:[-:]\s*)?(.+)").unwrap()) }
 fn re_vol_kw()   -> &'static Regex { static R: OnceLock<Regex> = OnceLock::new(); R.get_or_init(|| Regex::new(r"(?i)\b(vol(?:ume)?)\b").unwrap()) }
 fn re_ch_kw()    -> &'static Regex { static R: OnceLock<Regex> = OnceLock::new(); R.get_or_init(|| Regex::new(r"(?i)\b(ch(?:apter)?|ch\.)\b").unwrap()) }
 fn re_spaces()   -> &'static Regex { static R: OnceLock<Regex> = OnceLock::new(); R.get_or_init(|| Regex::new(r"\s{2,}").unwrap()) }
@@ -633,6 +633,19 @@ mod tests {
     #[test]
     fn extract_title_returns_none_without_a_title_part() {
         assert_eq!(extract_title_from_filename("Episode 5.cbz"), None);
+    }
+
+    #[test]
+    fn extract_title_preserves_text_without_a_dash_or_colon() {
+        // No "-" or ":" between the number and the trailing descriptive
+        // text -- previously this returned None entirely, silently
+        // discarding "(Season 1 Finale)" and falling back to a bare
+        // "Episode 42". The separator is now optional so this text is
+        // preserved instead of stripped.
+        assert_eq!(
+            extract_title_from_filename("Episode 42 (Season 1 Finale).cbz"),
+            Some("(Season 1 Finale)".to_string())
+        );
     }
 
     // ── is_sep_invalid_for_filename ────────────────────────────────────────────
