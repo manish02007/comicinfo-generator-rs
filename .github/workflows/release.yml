@@ -178,11 +178,17 @@ jobs:
 
       # ── Categorized changelog from Conventional Commits ──────────────────
       # Reads every commit message since the previous tag and buckets it by
-      # its prefix: feat / fix / chore / docs / refactor / perf / other.
-      # Write commits like:
+      # its prefix: feat / fix / perf / refactor / test / docs / chore /
+      # other. Write commits like:
       #   feat: add dry-run preview mode
       #   fix: correct counter race condition in worker
       #   chore: bump eframe to 0.29
+      #
+      # Scans the FULL commit body (%B), not just the subject (%s): a
+      # single commit can carry several conventional-commit lines stacked
+      # in its body (e.g. a squashed commit), and %s alone only ever sees
+      # the first one. Every line in %B that looks like "type: ..." is
+      # picked up individually, wherever in the commit message it lives.
       - name: Generate changelog
         id: changelog
         run: |
@@ -193,17 +199,34 @@ jobs:
             RANGE="$PREV_TAG..HEAD"
           fi
 
-          FEATURES=$(git log $RANGE --pretty=format:"%s" | grep -E '^feat(\(.+\))?:' || true)
-          FIXES=$(git log $RANGE --pretty=format:"%s" | grep -E '^fix(\(.+\))?:' || true)
-          REFACTOR=$(git log $RANGE --pretty=format:"%s" | grep -E '^refactor(\(.+\))?:' || true)
-          PERF=$(git log $RANGE --pretty=format:"%s" | grep -E '^perf(\(.+\))?:' || true)
-          DOCS=$(git log $RANGE --pretty=format:"%s" | grep -E '^docs(\(.+\))?:' || true)
-          CHORE=$(git log $RANGE --pretty=format:"%s" | grep -E '^chore(\(.+\))?:' || true)
-          OTHERS=$(git log $RANGE --pretty=format:"%s" | grep -vE '^(feat|fix|refactor|perf|docs|chore)(\(.+\))?:' || true)
+          BODY=$(git log $RANGE --pretty=format:"%B")
+          SUBJECTS=$(git log $RANGE --pretty=format:"%s")
 
-          # Strip the "type:" or "type(scope):" prefix, capitalize first letter
+          KNOWN_TYPES='(feat|fix|perf|refactor|test|docs|chore|ci|build|style)'
+          GENERIC='^[a-zA-Z0-9_-]+(\(.+\))?!?:'
+
+          FEATURES=$(echo "$BODY" | grep -E '^feat(\(.+\))?!?:' || true)
+          FIXES=$(echo "$BODY" | grep -E '^fix(\(.+\))?!?:' || true)
+          PERF=$(echo "$BODY" | grep -E '^perf(\(.+\))?!?:' || true)
+          REFACTOR=$(echo "$BODY" | grep -E '^refactor(\(.+\))?!?:' || true)
+          TESTS=$(echo "$BODY" | grep -E '^test(\(.+\))?!?:' || true)
+          DOCS=$(echo "$BODY" | grep -E '^docs(\(.+\))?!?:' || true)
+          CHORE=$(echo "$BODY" | grep -E '^(chore|ci|build|style)(\(.+\))?!?:' || true)
+
+          # Anything left: conventional-style body lines of a type outside
+          # the known set above, plus whole commits whose subject never
+          # followed the convention at all (merge commits, "wip", ...).
+          # NON_CONVENTIONAL_SUBJECTS is restricted to subjects with no
+          # colon-prefix at all, since any subject that DOES have one is
+          # already present as the first line of BODY and would otherwise
+          # be double-counted here.
+          OTHER_LINES=$(echo "$BODY" | grep -E "$GENERIC" | grep -vE "^${KNOWN_TYPES}(\(.+\))?!?:" || true)
+          NON_CONVENTIONAL_SUBJECTS=$(echo "$SUBJECTS" | grep -vE "$GENERIC" || true)
+          OTHERS=$(printf '%s\n%s\n' "$OTHER_LINES" "$NON_CONVENTIONAL_SUBJECTS" | sed '/^$/d')
+
+          # Strip the "type:" / "type(scope):" / "type!:" prefix, capitalize first letter
           clean() {
-            sed -E 's/^[a-z]+(\([^)]+\))?: ?//' | sed -E 's/^(.)/\U\1/'
+            sed -E 's/^[a-zA-Z]+(\([^)]+\))?!?: ?//' | sed -E 's/^(.)/\U\1/'
           }
 
           echo "CHANGELOG<<EOF" >> "$GITHUB_OUTPUT"
@@ -228,6 +251,11 @@ jobs:
             echo "$REFACTOR" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
             echo "" >> "$GITHUB_OUTPUT"
           fi
+          if [ -n "$TESTS" ]; then
+            echo "### Tests" >> "$GITHUB_OUTPUT"
+            echo "$TESTS" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
+            echo "" >> "$GITHUB_OUTPUT"
+          fi
           if [ -n "$DOCS" ]; then
             echo "### Documentation" >> "$GITHUB_OUTPUT"
             echo "$DOCS" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
@@ -240,7 +268,7 @@ jobs:
           fi
           if [ -n "$OTHERS" ]; then
             echo "### Other changes" >> "$GITHUB_OUTPUT"
-            echo "$OTHERS" | sed -E 's/^(.)/\U\1/' | sed 's/^/- /' >> "$GITHUB_OUTPUT"
+            echo "$OTHERS" | clean | sed 's/^/- /' >> "$GITHUB_OUTPUT"
             echo "" >> "$GITHUB_OUTPUT"
           fi
 
