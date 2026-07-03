@@ -116,6 +116,10 @@ pub struct ComicInfoApp {
     // persisted separately from AppConfig, see state.rs::AppSettings.
     pub settings:      AppSettings,
     pub settings_open: bool,
+    // Tag Order dialog's "show only active tags" filter -- a view
+    // preference for that dialog, not config data, so it lives here rather
+    // than in AppConfig (doesn't get saved/loaded with a job config).
+    pub reorder_show_active_only: bool,
     // Table selection
     pub vol_sel:  Option<usize>,
     pub date_sel: Option<usize>,
@@ -160,6 +164,7 @@ impl ComicInfoApp {
             verbose:     false,
             settings:      AppSettings::default(),
             settings_open: false,
+            reorder_show_active_only: false,
             vol_sel:     None, date_sel: None, summ_sel: None, meta_field_sel: None,
             dialog:      None,
             pick_kind:   None, pick_rx: None,
@@ -1053,19 +1058,11 @@ impl ComicInfoApp {
             Dialog::ReorderTags => {
                 let mut open = true;
                 let mut reset = false;
-                // Snapshot + independent owned state: the closure below
-                // touches none of `self` directly, only these locals plus
-                // `from`/`to`/`reset`/`open`, which keeps this arm free of
-                // any question about mutable/immutable self-borrows
-                // overlapping inside an egui callback.
-                let order_snapshot: Vec<String> = self.cfg.tag_order.clone();
                 let active: HashSet<String> = self.cfg.metadata_fields.iter()
                     .map(|(t, _)| t.clone())
                     .chain(["Title", "Number", "Volume", "Summary", "Year", "Month", "Day"]
                         .map(String::from))
                     .collect();
-                let mut from: Option<usize> = None;
-                let mut to: Option<usize> = None;
 
                 egui::Window::new("Tag Order")
                     .resizable(true).collapsible(false)
@@ -1076,17 +1073,37 @@ impl ComicInfoApp {
                             "Drag to reorder. Controls the order tags are written to \
                              ComicInfo.xml -- dimmed tags aren't currently in use.")
                             .color(theme::TDIM).size(11.0));
+                        ui.add_space(4.0);
+                        ui.checkbox(&mut self.reorder_show_active_only,
+                            RichText::new("Show only tags currently in use").size(11.0));
+                        // Read after the checkbox so a click this frame is
+                        // reflected in this same frame's filtering rather
+                        // than lagging a frame behind.
+                        let show_active_only = self.reorder_show_active_only;
                         ui.add_space(6.0);
 
                         egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                            let frame = egui::Frame::default().inner_margin(2.0);
-                            let (_, dropped) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
-                                for (idx, tag) in order_snapshot.iter().enumerate() {
-                                    let id = egui::Id::new(("reorder_tag_row", idx));
-                                    let label = field_spec(tag).map(|s| s.label).unwrap_or(tag.as_str());
-                                    let color = if active.contains(tag) { theme::TXT } else { theme::TDIM };
+                            // Filtering by skipping items entirely (egui_dnd's
+                            // own recommended approach): zero the item spacing
+                            // globally so hidden rows don't leave gaps, then
+                            // restore it right before each row that actually
+                            // renders.
+                            let normal_spacing =
+                                std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
 
-                                    let response = ui.dnd_drag_source(id, idx, |ui| {
+                            egui_dnd::dnd(ui, "tag_order_dnd")
+                                .show_vec(&mut self.cfg.tag_order, |ui, tag, handle, _state| {
+                                    let is_active = active.contains(tag.as_str());
+                                    if show_active_only && !is_active {
+                                        return;
+                                    }
+                                    ui.spacing_mut().item_spacing.y = normal_spacing;
+                                    let label = field_spec(tag.as_str())
+                                        .map(|s| s.label).unwrap_or(tag.as_str());
+                                    let color = if is_active { theme::TXT } else { theme::TDIM };
+                                    // Whole row is the handle -- there's nothing
+                                    // else interactive in it to conflict with.
+                                    handle.ui(ui, |ui| {
                                         egui::Frame::none()
                                             .fill(theme::SURF3)
                                             .stroke(egui::Stroke::new(1.0, theme::BDR))
@@ -1096,37 +1113,8 @@ impl ComicInfoApp {
                                                 ui.set_width(ui.available_width());
                                                 ui.label(RichText::new(label).size(12.0).color(color));
                                             });
-                                    }).response;
-
-                                    // Detect drops onto this row and preview the insertion point.
-                                    if let (Some(pointer), Some(hovered)) = (
-                                        ui.input(|i| i.pointer.interact_pos()),
-                                        response.dnd_hover_payload::<usize>(),
-                                    ) {
-                                        let rect = response.rect;
-                                        let stroke = egui::Stroke::new(2.0, theme::ACC);
-                                        let insert_idx = if *hovered == idx {
-                                            idx
-                                        } else if pointer.y < rect.center().y {
-                                            ui.painter().hline(rect.x_range(), rect.top(), stroke);
-                                            idx
-                                        } else {
-                                            ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
-                                            idx + 1
-                                        };
-                                        if let Some(dragged) = response.dnd_release_payload::<usize>() {
-                                            from = Some(*dragged);
-                                            to = Some(insert_idx);
-                                        }
-                                    }
-                                    ui.add_space(3.0);
-                                }
-                            });
-                            // Dropped in the zone but not onto any specific row -> append at the end.
-                            if let Some(dragged) = dropped {
-                                from = Some(*dragged);
-                                to = Some(usize::MAX);
-                            }
+                                    });
+                                });
                         });
 
                         ui.add_space(8.0);
@@ -1142,15 +1130,6 @@ impl ComicInfoApp {
 
                 if reset {
                     self.cfg.tag_order = default_tag_order();
-                } else if let (Some(from), Some(mut to)) = (from, to) {
-                    // Standard reorder-by-drag index adjustment: removing
-                    // `from` shifts everything after it down by one, so a
-                    // forward move's target needs the same adjustment before
-                    // the removal happens.
-                    to -= (from < to) as usize;
-                    let item = self.cfg.tag_order.remove(from);
-                    to = to.min(self.cfg.tag_order.len());
-                    self.cfg.tag_order.insert(to, item);
                 }
                 if open {
                     self.dialog = Some(Dialog::ReorderTags);
