@@ -90,6 +90,8 @@ pub enum Dialog {
     /// Lists all ComicInfo schema fields not currently in metadata_fields,
     /// letting the user pick one to add.
     AddMetadataTag,
+    /// Drag-and-drop reordering of the tags written to ComicInfo.xml.
+    ReorderTags,
     /// Shows the list of fields imported from a .py or .json metadata file
     ImportResult { filename: String, items: Vec<(String, String)> },
 }
@@ -608,6 +610,7 @@ impl ComicInfoApp {
             zero_pad: self.cfg.zero_pad, pad_width: self.cfg.pad_width,
             metadata_fields: self.cfg.metadata_fields.iter().cloned().collect(),
             community_rating_10_scale: self.cfg.community_rating_10_scale,
+            tag_order: self.cfg.tag_order.clone(),
             summary: self.cfg.summary.clone(),
             volume_rules:  self.cfg.volume_rules.clone(),
             date_rules:    self.cfg.date_rules.clone(),
@@ -1043,6 +1046,114 @@ impl ComicInfoApp {
                     self.cfg.metadata_fields.push((tag.to_string(), String::new()));
                 } else if open {
                     self.dialog = Some(Dialog::AddMetadataTag);
+                }
+            }
+
+            // ── Tag order (drag and drop) ─────────────────────────────────
+            Dialog::ReorderTags => {
+                let mut open = true;
+                let mut reset = false;
+                // Snapshot + independent owned state: the closure below
+                // touches none of `self` directly, only these locals plus
+                // `from`/`to`/`reset`/`open`, which keeps this arm free of
+                // any question about mutable/immutable self-borrows
+                // overlapping inside an egui callback.
+                let order_snapshot: Vec<String> = self.cfg.tag_order.clone();
+                let active: HashSet<String> = self.cfg.metadata_fields.iter()
+                    .map(|(t, _)| t.clone())
+                    .chain(["Title", "Number", "Volume", "Summary", "Year", "Month", "Day"]
+                        .map(String::from))
+                    .collect();
+                let mut from: Option<usize> = None;
+                let mut to: Option<usize> = None;
+
+                egui::Window::new("Tag Order")
+                    .resizable(true).collapsible(false)
+                    .min_width(300.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .show(ctx, |ui| {
+                        ui.label(RichText::new(
+                            "Drag to reorder. Controls the order tags are written to \
+                             ComicInfo.xml -- dimmed tags aren't currently in use.")
+                            .color(theme::TDIM).size(11.0));
+                        ui.add_space(6.0);
+
+                        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                            let frame = egui::Frame::default().inner_margin(2.0);
+                            let (_, dropped) = ui.dnd_drop_zone::<usize, ()>(frame, |ui| {
+                                for (idx, tag) in order_snapshot.iter().enumerate() {
+                                    let id = egui::Id::new(("reorder_tag_row", idx));
+                                    let label = field_spec(tag).map(|s| s.label).unwrap_or(tag.as_str());
+                                    let color = if active.contains(tag) { theme::TXT } else { theme::TDIM };
+
+                                    let response = ui.dnd_drag_source(id, idx, |ui| {
+                                        egui::Frame::none()
+                                            .fill(theme::SURF3)
+                                            .stroke(egui::Stroke::new(1.0, theme::BDR))
+                                            .rounding(egui::Rounding::same(4.0))
+                                            .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                                            .show(ui, |ui| {
+                                                ui.set_width(ui.available_width());
+                                                ui.label(RichText::new(label).size(12.0).color(color));
+                                            });
+                                    }).response;
+
+                                    // Detect drops onto this row and preview the insertion point.
+                                    if let (Some(pointer), Some(hovered)) = (
+                                        ui.input(|i| i.pointer.interact_pos()),
+                                        response.dnd_hover_payload::<usize>(),
+                                    ) {
+                                        let rect = response.rect;
+                                        let stroke = egui::Stroke::new(2.0, theme::ACC);
+                                        let insert_idx = if *hovered == idx {
+                                            idx
+                                        } else if pointer.y < rect.center().y {
+                                            ui.painter().hline(rect.x_range(), rect.top(), stroke);
+                                            idx
+                                        } else {
+                                            ui.painter().hline(rect.x_range(), rect.bottom(), stroke);
+                                            idx + 1
+                                        };
+                                        if let Some(dragged) = response.dnd_release_payload::<usize>() {
+                                            from = Some(*dragged);
+                                            to = Some(insert_idx);
+                                        }
+                                    }
+                                    ui.add_space(3.0);
+                                }
+                            });
+                            // Dropped in the zone but not onto any specific row -> append at the end.
+                            if let Some(dragged) = dropped {
+                                from = Some(*dragged);
+                                to = Some(usize::MAX);
+                            }
+                        });
+
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(theme::btn_secondary("Reset to Default")).clicked() {
+                                reset = true;
+                            }
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(theme::btn_primary("  Done  ")).clicked() { open = false; }
+                            });
+                        });
+                    });
+
+                if reset {
+                    self.cfg.tag_order = default_tag_order();
+                } else if let (Some(from), Some(mut to)) = (from, to) {
+                    // Standard reorder-by-drag index adjustment: removing
+                    // `from` shifts everything after it down by one, so a
+                    // forward move's target needs the same adjustment before
+                    // the removal happens.
+                    to -= (from < to) as usize;
+                    let item = self.cfg.tag_order.remove(from);
+                    to = to.min(self.cfg.tag_order.len());
+                    self.cfg.tag_order.insert(to, item);
+                }
+                if open {
+                    self.dialog = Some(Dialog::ReorderTags);
                 }
             }
 
@@ -1738,16 +1849,28 @@ impl ComicInfoApp {
                         ).on_hover_text("Add another ComicInfo field.").clicked() {
                             pending_dialog = Some(Dialog::AddMetadataTag);
                         }
+                        ui.add_space(2.0);
+                        if ui.add(
+                            egui::Button::new(RichText::new("Tag Order").size(11.0).color(theme::ACC))
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::new(1.0, theme::BDR))
+                                .rounding(egui::Rounding::same(5.0))
+                                .min_size(egui::vec2(0.0, 24.0))
+                        ).on_hover_text("See and drag to rearrange the order tags are written to ComicInfo.xml.").clicked() {
+                            pending_dialog = Some(Dialog::ReorderTags);
+                        }
                     });
                 });
                 ui.add_space(8.0);
 
-                // Display fields in canonical schema order regardless of the
-                // order they were added in, for a stable, predictable layout.
+                // Display fields in the current tag order (custom via the Tag
+                // Order dialog, defaulting to canonical schema order) rather
+                // than insertion order, for a stable layout that always
+                // matches what's actually written to the XML.
                 let sel_tag = self.meta_field_sel.clone();
                 let mut new_sel = sel_tag.clone();
                 let mut order: Vec<usize> = (0..self.cfg.metadata_fields.len()).collect();
-                order.sort_by_key(|&i| canonical_index(&self.cfg.metadata_fields[i].0));
+                order.sort_by_key(|&i| tag_rank(&self.cfg.metadata_fields[i].0, &self.cfg.tag_order));
 
                 // ui.horizontal_wrapped() doesn't reliably detect the row
                 // boundary when nested this deep inside Frame/ScrollArea --

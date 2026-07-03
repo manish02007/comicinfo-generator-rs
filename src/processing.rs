@@ -288,6 +288,23 @@ pub fn canonical_index(tag: &str) -> usize {
     CANONICAL_ORDER.iter().position(|&t| t == tag).unwrap_or(usize::MAX)
 }
 
+/// The built-in schema order, owned and ready to seed `AppConfig::tag_order`
+/// or to reset a user's customized order back to the default.
+pub fn default_tag_order() -> Vec<String> {
+    CANONICAL_ORDER.iter().map(|s| s.to_string()).collect()
+}
+
+/// Rank of `tag` within a possibly user-customized order (see the Tag Order
+/// dialog). A tag missing from `order` -- e.g. a saved order from before a
+/// new field existed in the registry -- falls back to its position in the
+/// built-in canonical order, offset to sort after every tag the user has
+/// explicitly placed rather than being silently tied with every other
+/// unknown tag at `usize::MAX`.
+pub fn tag_rank(tag: &str, order: &[String]) -> usize {
+    order.iter().position(|t| t == tag)
+        .unwrap_or_else(|| CANONICAL_ORDER.len() + canonical_index(tag))
+}
+
 /// Looks up a field's spec (kind, width, tooltip) by its exact tag name.
 pub fn field_spec(tag: &str) -> Option<&'static FieldSpec> {
     COMICINFO_FIELDS.iter().find(|f| f.tag == tag)
@@ -304,11 +321,12 @@ fn escape_xml(s: &str) -> String {
 /// Builds ComicInfo.xml from a dynamic tag->value map. Only tags actually
 /// present in `data` are emitted -- removing a field from the constant
 /// metadata box means its tag no longer appears in the XML at all, rather
-/// than emitting it empty. Tags are sorted into canonical schema order
-/// regardless of insertion order.
-pub fn build_comic_info_xml(data: &HashMap<String, String>) -> String {
+/// than emitting it empty. Tags are sorted by `order` (see the Tag Order
+/// dialog / `AppConfig::tag_order`), which defaults to canonical schema
+/// order but can be customized per-config.
+pub fn build_comic_info_xml(data: &HashMap<String, String>, order: &[String]) -> String {
     let mut entries: Vec<(&String, &String)> = data.iter().collect();
-    entries.sort_by_key(|(tag, _)| canonical_index(tag));
+    entries.sort_by_key(|(tag, _)| tag_rank(tag, order));
 
     let mut xml = String::from("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<ComicInfo>\n");
     for (tag, val) in entries {
@@ -653,7 +671,7 @@ mod tests {
     fn xml_builder_escapes_special_characters() {
         let mut data = HashMap::new();
         data.insert("Series".to_string(), "Tom & Jerry's \"Big\" Day <2>".to_string());
-        let xml = build_comic_info_xml(&data);
+        let xml = build_comic_info_xml(&data, &default_tag_order());
         assert!(xml.contains("&amp;"));
         assert!(xml.contains("&apos;"));
         assert!(xml.contains("&quot;"));
@@ -666,7 +684,7 @@ mod tests {
         let mut data = HashMap::new();
         data.insert("Title".to_string(), "Episode 1".to_string());
         data.insert("Volume".to_string(), "".to_string());
-        let xml = build_comic_info_xml(&data);
+        let xml = build_comic_info_xml(&data, &default_tag_order());
         assert!(!xml.contains("<Volume>"));
     }
 
@@ -677,7 +695,7 @@ mod tests {
         let mut data = HashMap::new();
         data.insert("Writer".to_string(), "A".to_string());
         data.insert("Series".to_string(), "B".to_string());
-        let xml = build_comic_info_xml(&data);
+        let xml = build_comic_info_xml(&data, &default_tag_order());
         let series_pos = xml.find("<Series>").unwrap();
         let writer_pos  = xml.find("<Writer>").unwrap();
         assert!(series_pos < writer_pos);
@@ -687,9 +705,44 @@ mod tests {
     fn xml_builder_only_emits_tags_actually_present() {
         let mut data = HashMap::new();
         data.insert("Series".to_string(), "Only This".to_string());
-        let xml = build_comic_info_xml(&data);
+        let xml = build_comic_info_xml(&data, &default_tag_order());
         assert!(xml.contains("<Series>"));
         assert!(!xml.contains("<Writer>"));
         assert!(!xml.contains("<Genre>"));
+    }
+
+    #[test]
+    fn xml_builder_respects_a_custom_tag_order() {
+        // Same two tags as the canonical-order test above, but with a custom
+        // order that deliberately reverses their usual relationship -- proves
+        // the Tag Order feature actually reaches the XML output, not just the
+        // UI's own display sort.
+        let mut data = HashMap::new();
+        data.insert("Writer".to_string(), "A".to_string());
+        data.insert("Series".to_string(), "B".to_string());
+        let custom_order = vec!["Writer".to_string(), "Series".to_string()];
+        let xml = build_comic_info_xml(&data, &custom_order);
+        let series_pos = xml.find("<Series>").unwrap();
+        let writer_pos  = xml.find("<Writer>").unwrap();
+        assert!(writer_pos < series_pos);
+    }
+
+    #[test]
+    fn xml_builder_falls_back_to_canonical_order_for_tags_missing_from_a_custom_order() {
+        // A custom order saved before a field existed in the registry (or
+        // simply never touched) shouldn't crash or silently tie every
+        // unlisted tag together -- unlisted tags keep their relative
+        // canonical ordering, appended after everything explicitly ordered.
+        let mut data = HashMap::new();
+        data.insert("Series".to_string(), "A".to_string());
+        data.insert("Writer".to_string(), "B".to_string());
+        data.insert("Genre".to_string(), "C".to_string());
+        let custom_order = vec!["Genre".to_string()]; // Series/Writer not listed
+        let xml = build_comic_info_xml(&data, &custom_order);
+        let genre_pos  = xml.find("<Genre>").unwrap();
+        let series_pos = xml.find("<Series>").unwrap();
+        let writer_pos = xml.find("<Writer>").unwrap();
+        assert!(genre_pos < series_pos, "explicitly-ordered tag should sort first");
+        assert!(series_pos < writer_pos, "unlisted tags keep canonical relative order");
     }
 }

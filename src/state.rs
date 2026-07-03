@@ -87,6 +87,11 @@ pub struct AppConfig {
     // the value is converted (rating/10*5) once, at XML-write time --
     // what's stored/shown in the box is always exactly what was typed.
     pub community_rating_10_scale: bool,
+    // Custom order tags are written to ComicInfo.xml in (see the Tag Order
+    // dialog next to Add Tag / Remove). Defaults to the built-in canonical
+    // schema order; always a permutation of every known tag, not just the
+    // ones currently active in metadata_fields.
+    pub tag_order: Vec<String>,
     // Summary is kept separate from metadata_fields: it has its own
     // dedicated multi-line UI and chapter-1/fallback override logic.
     pub summary: String,
@@ -131,6 +136,7 @@ impl Default for AppConfig {
                 ("Web".to_string(),              String::new()),
             ],
             community_rating_10_scale: false,
+            tag_order: crate::processing::default_tag_order(),
             summary: String::new(),
             volume_rules: vec![
                 vec!["1".into(),  "3.5".into(), "1".into()],

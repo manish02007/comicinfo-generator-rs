@@ -73,6 +73,7 @@ pub struct WorkerConfig {
     // rating_10_scale) and converted to the schema's real 0-5 scale once,
     // right when metadata_fields is turned into the per-file dict below.
     pub community_rating_10_scale: bool,
+    pub tag_order:        Vec<String>,
     pub summary:          String,
     pub volume_rules:     Vec<Vec<String>>,
     pub date_rules:       Vec<Vec<String>>,
@@ -442,7 +443,7 @@ fn process_one(
         batch.push((format!("       summary={summ_note}"), LogLevel::Dim));
     }
 
-    let xml_content = build_comic_info_xml(&md);
+    let xml_content = build_comic_info_xml(&md, &cfg.tag_order);
 
     // ── New filename ──────────────────────────────────────────────────────────
     let new_name = if has_reliable_title {
