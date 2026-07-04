@@ -335,30 +335,91 @@ impl ComicInfoApp {
                 ));
                 return;
             };
+            let Some(map) = json.as_object() else {
+                self.dialog = Some(Dialog::Notice(
+                    "No recognised metadata fields found in the file.\n\n                 Expected a Python file with CONSTANT_METADATA dict and/or SUMMARY,\n                 or a JSON object with ComicInfo field names.".to_string()
+                ));
+                return;
+            };
 
-            // Full app config?
-            if let Some(map) = json.as_object() {
-                if map.contains_key("folder") || map.contains_key("prefix_mode") {
-                    if let Ok(cfg) = serde_json::from_str::<AppConfig>(&data) {
+            // Full app config? Import the structural settings (paths,
+            // rules, prefix/separator/mode, ...) directly, then fall
+            // through to the flat-field scan below on the SAME map --
+            // this used to return immediately here with one generic
+            // "Config loaded" line, silently dropping any flat metadata
+            // field that pre-dates the dynamic metadata_fields list
+            // (series, writer, rating, ...), since AppConfig no longer
+            // has a named struct field for any of them.
+            if map.contains_key("folder") || map.contains_key("prefix_mode") {
+                match serde_json::from_str::<AppConfig>(&data) {
+                    Ok(cfg) => {
                         self.cfg = cfg;
                         self.rebuild_sep_preview();
-                        self.dialog = Some(Dialog::ImportResult {
-                            filename: fname.clone(),
-                            items: vec![("Config".to_string(), "Full session config loaded".to_string())],
-                        });
+                        for (label, count) in [
+                            ("Volume Rules",  self.cfg.volume_rules.len()),
+                            ("Date Rules",    self.cfg.date_rules.len()),
+                            ("Summary Rules", self.cfg.summ_rules.len()),
+                        ] {
+                            if count > 0 {
+                                imported.push((label.to_string(), format!("{count} rule(s)")));
+                            }
+                        }
+                        // Custom (non-standard) fields the old tool had no
+                        // named slot for. Accepts ["Tag","Value"] pairs or
+                        // {"tag":...,"value":...} objects; anything else is
+                        // reported rather than silently dropped.
+                        if let Some(arr) = map.get("custom_fields").and_then(|v| v.as_array()) {
+                            let mut unrecognised = 0;
+                            for entry in arr {
+                                let pair = match entry {
+                                    serde_json::Value::Array(a) if a.len() == 2 =>
+                                        a[0].as_str().zip(a[1].as_str())
+                                            .map(|(t, v)| (t.to_string(), v.to_string())),
+                                    serde_json::Value::Object(o) => {
+                                        o.get("tag").and_then(|t| t.as_str())
+                                            .zip(o.get("value").and_then(|v| v.as_str()))
+                                            .map(|(t, v)| (t.to_string(), v.to_string()))
+                                            .or_else(|| if o.len() == 1 {
+                                                o.iter().next()
+                                                    .and_then(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                                            } else { None })
+                                    }
+                                    _ => None,
+                                };
+                                match pair {
+                                    Some((tag, val)) => {
+                                        let display_val = if val.len() > 80 { format!("{}...", &val[..77]) } else { val.clone() };
+                                        self.set_metadata_field(&tag, val);
+                                        imported.push((tag, display_val));
+                                    }
+                                    None => unrecognised += 1,
+                                }
+                            }
+                            if unrecognised > 0 {
+                                imported.push((
+                                    "Custom Fields".to_string(),
+                                    format!("{unrecognised} entr{} in an unrecognised format -- check manually",
+                                        if unrecognised == 1 { "y" } else { "ies" }),
+                                ));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        self.dialog = Some(Dialog::Notice(format!(
+                            "Recognised this as a full config file, but couldn't load it:\n{e}"
+                        )));
                         return;
                     }
                 }
             }
 
-            // Flat metadata dict
-            json.as_object()
-                .map(|map| {
-                    map.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                        .collect()
-                })
-                .unwrap_or_default()
+            // Flat metadata fields -- also runs after a full-config load
+            // above, so legacy per-field names that were never AppConfig
+            // struct fields (and so were invisible to the deserialize
+            // above) still make it into metadata_fields.
+            map.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
         };
 
         // ── Apply extracted key-value pairs to config ─────────────────────
@@ -368,18 +429,34 @@ impl ComicInfoApp {
             } else {
                 val.clone()
             };
-            // "Rating" is a legacy alias: the old app emitted a non-standard
-            // <Rating> tag; the real schema field is CommunityRating.
-            let tag = if key == "Rating" { "CommunityRating" } else { key.as_str() };
 
-            if tag == "Summary" {
+            if key.eq_ignore_ascii_case("Summary") {
                 self.cfg.summary = val.clone();
                 imported.push(("Summary".to_string(), display_val));
-            } else if let Some(spec) = field_spec(tag) {
-                self.set_metadata_field(tag, val.clone());
-                imported.push((spec.label.to_string(), display_val));
+                continue;
             }
-            // else: not a recognised ComicInfo field -- silently skip.
+
+            // A key that's already a real ComicInfo tag takes priority;
+            // legacy_field_alias only covers names the OLD app used that
+            // either never were real tags ("Rating") or changed shape
+            // (snake_case -> PascalCase, e.g. "alt_series").
+            let resolved = field_spec(key).map(|s| (s.tag, false))
+                .or_else(|| Self::legacy_field_alias(key));
+
+            if let Some((tag, is_legacy_rating)) = resolved {
+                if is_legacy_rating {
+                    // The old app's "Rating" field was always a 1-10
+                    // score -- there's no such tag in the ComicInfo
+                    // schema. The real field is CommunityRating on a 0-5
+                    // scale, so this also switches on the 1-10 input
+                    // scale to match how the value was actually entered.
+                    self.cfg.community_rating_10_scale = true;
+                }
+                self.set_metadata_field(tag, val.clone());
+                let label = field_spec(tag).map(|s| s.label).unwrap_or(tag);
+                imported.push((label.to_string(), display_val));
+            }
+            // else: not a recognised ComicInfo field or legacy alias -- silently skip.
         }
 
         if imported.is_empty() {
@@ -389,6 +466,29 @@ impl ComicInfoApp {
         } else {
             self.status = format!("Imported {} field(s) from {fname}", imported.len());
             self.dialog = Some(Dialog::ImportResult { filename: fname, items: imported });
+        }
+    }
+
+    // Legacy field names used by the old Python/tkinter tool's JSON export,
+    // mapped to (real_comicinfo_tag, is_legacy_rating). is_legacy_rating
+    // marks the one case ("Rating"/"rating") that needs a side effect
+    // beyond the rename -- see the call site in import_meta.
+    fn legacy_field_alias(key: &str) -> Option<(&'static str, bool)> {
+        match key.to_lowercase().as_str() {
+            "series"     => Some(("Series", false)),
+            "writer"     => Some(("Writer", false)),
+            "penciller"  => Some(("Penciller", false)),
+            "publisher"  => Some(("Publisher", false)),
+            "language"   => Some(("LanguageISO", false)),
+            "alt_series" => Some(("AlternateSeries", false)),
+            "web"        => Some(("Web", false)),
+            "genre"      => Some(("Genre", false)),
+            "count"      => Some(("Count", false)),
+            "year"       => Some(("Year", false)),
+            "month"      => Some(("Month", false)),
+            "day"        => Some(("Day", false)),
+            "rating"     => Some(("CommunityRating", true)),
+            _ => None,
         }
     }
     fn reset_all(&mut self) {
