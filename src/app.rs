@@ -2006,37 +2006,59 @@ impl ComicInfoApp {
     }
 
     fn show_rules(&mut self, ui: &mut egui::Ui) {
-        // Tables size themselves to their own row count now (see table()),
-        // so there's no need to pre-divide available height among the 3
-        // sections. The outer ScrollArea below is the only safety net
-        // needed if their combined content ever exceeds the visible area.
+        // Outer safety net only: with the three equal, non-shrinking shares
+        // below (see each_h), the 3 cards' combined height should already
+        // match the tab's available space in the normal case, so this
+        // rarely needs to actually scroll -- it just prevents anything
+        // from being clipped on an unusually short window.
         egui::ScrollArea::vertical().id_salt("rules_scr").show(ui, |ui| {
         egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(20.0, 16.0))
             .show(ui, |ui| {
 
+        // Each card gets an equal share of the available height instead of
+        // sizing to its own (possibly empty) row count -- so 3 empty tables
+        // fill the tab like 3 empty boxes instead of shrinking to their
+        // headers and leaving a dead gap below. A card whose rows don't fit
+        // its share scrolls internally instead of growing past it.
+        let card_padding = 28.0; // theme::card()'s 14px inner_margin, top + bottom
+        let gaps         = 20.0; // 2 x add_space(10.0) between the 3 cards
+        let each_h = ((ui.available_height() - gaps - 3.0 * card_padding) / 3.0).max(110.0);
+
         theme::card().show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("vol_rules_scr")
+                .max_height(each_h).auto_shrink([true, false])
+                .show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
                 ui, "Volume Rules   -   Chapter range -> Volume number",
                 &[("Ch Start", 110.0),("Ch End", 110.0),("Volume", 110.0)],
                 &mut self.cfg.volume_rules, &mut self.vol_sel, RuleTarget::Volume,
             ) { self.dialog = Some(dlg); }
+                });
         });
         ui.add_space(10.0);
         theme::card().show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("date_rules_scr")
+                .max_height(each_h).auto_shrink([true, false])
+                .show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
                 ui, "Date Rules   -   Volume range -> Publication Date",
                 &[("Vol Start",90.0),("Vol End",90.0),("Year",70.0),("Month",70.0),("Day",70.0)],
                 &mut self.cfg.date_rules, &mut self.date_sel, RuleTarget::Date,
             ) { self.dialog = Some(dlg); }
+                });
         });
         ui.add_space(10.0);
         theme::card().show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt("summ_rules_scr")
+                .max_height(each_h).auto_shrink([true, false])
+                .show(ui, |ui| {
             if let Some(dlg) = Self::rule_section(
                 ui, "Summary Rules   -   Volume range -> Custom Summary",
                 &[("Vol Start",90.0),("Vol End",90.0),("Summary",560.0)],
                 &mut self.cfg.summ_rules, &mut self.summ_sel, RuleTarget::Summary,
             ) { self.dialog = Some(dlg); }
+                });
         });
 
             }); // Frame
