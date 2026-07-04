@@ -1691,27 +1691,27 @@ impl ComicInfoApp {
             ui.columns(2, |cols| {
                 let lc = &mut cols[0];
                 egui::Frame::none().outer_margin(egui::Margin { left:20.0, right:8.0, ..Default::default() }).show(lc, |ui| {
-                    // Mode
+                    // Mode + Volume metadata -- merged into one card since
+                    // Mode's only effect is setting these 3 checkboxes, and
+                    // Mode alone was a two-radio-button sliver next to much
+                    // taller neighbors.
                     theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Mode");
+                        theme::section_hdr(ui, "Mode & Volume Metadata");
                         ui.horizontal(|ui| {
                             let was = self.cfg.mode.clone();
                             ui.radio_value(&mut self.cfg.mode, ComicMode::Manga, "Manga")
-                                .on_hover_text("Turns ON all Volume Metadata options (default for most manga).");
+                                .on_hover_text("Turns ON all Volume Metadata options below (default for most manga).");
                             ui.add_space(8.0);
                             ui.radio_value(&mut self.cfg.mode, ComicMode::Manhwa, "Manhwa / Manhua")
-                                .on_hover_text("Turns OFF all Volume Metadata options (no volumes in manhwa).");
+                                .on_hover_text("Turns OFF all Volume Metadata options below (no volumes in manhwa).");
                             if self.cfg.mode != was {
                                 let is_m = matches!(self.cfg.mode, ComicMode::Manga);
                                 self.cfg.use_vol = is_m; self.cfg.use_vol_date = is_m; self.cfg.use_vol_summ = is_m;
                             }
                         });
-                    });
-                    ui.add_space(10.0);
-                    // Volume metadata -- kept directly under Mode, since
-                    // selecting a mode above sets all 3 of these checkboxes.
-                    theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Volume Metadata");
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
                         ui.checkbox(&mut self.cfg.use_vol, RichText::new("Include volume number in metadata").size(12.0))
                             .on_hover_text("Enables Volume field in ComicInfo.xml. Disable for manhwa.");
                         ui.checkbox(&mut self.cfg.use_vol_date, RichText::new("Use volume date rules for publication").size(12.0))
@@ -1751,7 +1751,11 @@ impl ComicInfoApp {
 
                 let rc = &mut cols[1];
                 egui::Frame::none().outer_margin(egui::Margin { left:8.0, right:20.0, ..Default::default() }).show(rc, |ui| {
-                    // Prefix mode
+                    // Prefix mode + Post-finale -- merged into one card
+                    // since post-finale behaviour is a refinement of the
+                    // same numbering scheme, and Post-Finale Behaviour
+                    // alone was a one-dropdown sliver next to much taller
+                    // neighbors.
                     theme::card().show(ui, |ui| {
                         theme::section_hdr(ui, "Number Prefix");
                         for (val, lbl) in [
@@ -1774,11 +1778,9 @@ impl ComicInfoApp {
                             ).on_hover_text("Used when prefix mode is \"custom\". E.g. \"Break\".");
                             if r.changed() { self.rebuild_sep_preview(); }
                         });
-                    });
-                    ui.add_space(10.0);
-                    // Post-finale
-                    theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Post-Finale Behaviour");
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(6.0);
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("After finale:").color(theme::TXT).size(12.0));
                             egui::ComboBox::from_id_salt("pf")
