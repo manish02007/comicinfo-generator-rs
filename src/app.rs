@@ -326,6 +326,26 @@ impl ComicInfoApp {
                 }
             }
 
+            // ── Parse rule tables ─────────────────────────────────────────
+            // VOLUME_RULES / DATE_RULES / VOLUME_SUMMARY_RULES = [ (...), ... ]
+            // Rules aren't simple key-value pairs, so they're applied
+            // directly here rather than folded into `pairs`.
+            let vol_rows  = Self::parse_py_tuple_block(&data, "VOLUME_RULES");
+            let date_rows = Self::parse_py_tuple_block(&data, "DATE_RULES");
+            let summ_rows = Self::parse_py_tuple_block(&data, "VOLUME_SUMMARY_RULES");
+            if !vol_rows.is_empty() {
+                imported.push(("Volume Rules".to_string(), format!("{} rule(s)", vol_rows.len())));
+                self.cfg.volume_rules = vol_rows;
+            }
+            if !date_rows.is_empty() {
+                imported.push(("Date Rules".to_string(), format!("{} rule(s)", date_rows.len())));
+                self.cfg.date_rules = date_rows;
+            }
+            if !summ_rows.is_empty() {
+                imported.push(("Summary Rules".to_string(), format!("{} rule(s)", summ_rows.len())));
+                self.cfg.summ_rules = summ_rows;
+            }
+
             pairs
         } else {
             // ── JSON file parser ──────────────────────────────────────────
@@ -491,6 +511,85 @@ impl ComicInfoApp {
             _ => None,
         }
     }
+
+    // Extracts rows from a Python list-of-tuples block:
+    //   VOLUME_RULES = [
+    //       # optional comment lines, skipped
+    //       (1, 17, "1"),
+    //       (18, 34, "3"),
+    //   ]
+    // Each tuple must be on its own line. Comment lines (starting with #)
+    // and blank lines between tuples are skipped. Stops at the first line
+    // starting with `]`.
+    fn parse_py_tuple_block(data: &str, marker: &str) -> Vec<Vec<String>> {
+        let mut rows = Vec::new();
+        let Some(start) = data.find(marker) else { return rows; };
+        let after = &data[start..];
+        let Some(bracket) = after.find('[') else { return rows; };
+        let body_start = start + bracket + 1;
+
+        for line in data[body_start..].lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with(']') { break; }
+            if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+            let Some(open) = trimmed.find('(') else { continue; };
+            let Some(close) = trimmed.rfind(')') else { continue; };
+            if close <= open { continue; }
+            let fields = Self::parse_py_tuple_fields(&trimmed[open + 1..close]);
+            if !fields.is_empty() {
+                rows.push(fields);
+            }
+        }
+        rows
+    }
+
+    // Splits the inside of a Python tuple literal into its fields, e.g.
+    // `1,  17, "1"` -> ["1", "17", "1"]. Handles a mix of bare tokens
+    // (numbers) and double-quoted strings (which may contain commas,
+    // apostrophes, or other punctuation) -- commas inside quotes are not
+    // treated as field separators. Quotes are stripped from the result;
+    // bare tokens are used as-is (trimmed).
+    fn parse_py_tuple_fields(inner: &str) -> Vec<String> {
+        let mut fields = Vec::new();
+        let mut current = String::new();
+        let mut in_quotes = false;
+        let mut chars = inner.chars().peekable();
+        while let Some(c) = chars.next() {
+            if in_quotes {
+                match c {
+                    '\\' => {
+                        if let Some(&next) = chars.peek() {
+                            match next {
+                                'n'  => { current.push('\n'); chars.next(); }
+                                '"'  => { current.push('"');  chars.next(); }
+                                '\\' => { current.push('\\'); chars.next(); }
+                                _    => current.push(c),
+                            }
+                        } else {
+                            current.push(c);
+                        }
+                    }
+                    '"' => { in_quotes = false; }
+                    _   => current.push(c),
+                }
+            } else {
+                match c {
+                    '"' => { in_quotes = true; }
+                    ',' => {
+                        fields.push(current.trim().to_string());
+                        current.clear();
+                    }
+                    _ => current.push(c),
+                }
+            }
+        }
+        let last = current.trim();
+        if !last.is_empty() {
+            fields.push(last.to_string());
+        }
+        fields
+    }
+
     fn reset_all(&mut self) {
         self.cfg = AppConfig::default();
         // AppConfig::default() ships with example Volume/Date rules so a
@@ -2120,59 +2219,63 @@ impl ComicInfoApp {
     }
 
     fn show_rules(&mut self, ui: &mut egui::Ui) {
-        // Outer safety net only: with the three equal, non-shrinking shares
-        // below (see each_h), the 3 cards' combined height should already
-        // match the tab's available space in the normal case, so this
-        // rarely needs to actually scroll -- it just prevents anything
-        // from being clipped on an unusually short window.
+        // Single scrollbar for the whole tab -- individual tables are
+        // never capped or independently scrollable. Each card gets an
+        // equal "fair share" of the tab's height as its default size (so
+        // 3 near-empty tables still look like they fill the window
+        // instead of leaving a dead gap below them), but this is
+        // computed once from the tab's height alone, independent of any
+        // card's row count -- so a table with enough rows to need more
+        // than its fair share just grows past it on its own, with zero
+        // effect on the other two cards' size. (An earlier version
+        // computed one shared "leftover space" pool from all 3 cards'
+        // combined height, which meant growing one card shrank all
+        // three back to bare minimum the moment the total stopped
+        // fitting -- this avoids that entirely.)
         egui::ScrollArea::vertical().id_salt("rules_scr").show(ui, |ui| {
         egui::Frame::none()
             .inner_margin(egui::Margin::symmetric(20.0, 16.0))
             .show(ui, |ui| {
 
-        // Each card gets an equal share of the available height instead of
-        // sizing to its own (possibly empty) row count -- so 3 empty tables
-        // fill the tab like 3 empty boxes instead of shrinking to their
-        // headers and leaving a dead gap below. A card whose rows don't fit
-        // its share scrolls internally instead of growing past it.
-        let card_padding = 28.0; // theme::card()'s 14px inner_margin, top + bottom
-        let gaps         = 20.0; // 2 x add_space(10.0) between the 3 cards
-        let each_h = ((ui.available_height() - gaps - 3.0 * card_padding) / 3.0).max(110.0);
+        const CARD_PAD: f32 = 28.0;      // theme::card()'s 14px inner_margin, top + bottom
+        const GAPS: f32 = 20.0;          // 2 x 10px add_space between the 3 cards
+        const SAFETY_MARGIN: f32 = 10.0; // small buffer against layout rounding
+        let fair_share = ((ui.available_height() - GAPS - SAFETY_MARGIN) / 3.0).max(100.0);
 
-        theme::card().show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("vol_rules_scr")
-                .max_height(each_h).auto_shrink([true, false])
-                .show(ui, |ui| {
+        // Renders one card and pads it up to fair_share if its actual
+        // content (measured via ui.scope(), not estimated) is shorter --
+        // never shrinks it below what its own rows need.
+        let rule_card = |ui: &mut egui::Ui, add_contents: &mut dyn FnMut(&mut egui::Ui)| {
+            theme::card().show(ui, |ui| {
+                let r = ui.scope(|ui| add_contents(ui));
+                let natural_h = r.response.rect.height() + CARD_PAD;
+                let pad = (fair_share - natural_h).max(0.0);
+                if pad > 0.0 { ui.add_space(pad); }
+            });
+        };
+
+        rule_card(ui, &mut |ui| {
             if let Some(dlg) = Self::rule_section(
                 ui, "Volume Rules   -   Chapter range -> Volume number",
                 &[("Ch Start", 110.0),("Ch End", 110.0),("Volume", 110.0)],
                 &mut self.cfg.volume_rules, &mut self.vol_sel, RuleTarget::Volume,
             ) { self.dialog = Some(dlg); }
-                });
         });
         ui.add_space(10.0);
-        theme::card().show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("date_rules_scr")
-                .max_height(each_h).auto_shrink([true, false])
-                .show(ui, |ui| {
+        rule_card(ui, &mut |ui| {
             if let Some(dlg) = Self::rule_section(
                 ui, "Date Rules   -   Volume range -> Publication Date",
                 &[("Vol Start",90.0),("Vol End",90.0),("Year",70.0),("Month",70.0),("Day",70.0)],
                 &mut self.cfg.date_rules, &mut self.date_sel, RuleTarget::Date,
             ) { self.dialog = Some(dlg); }
-                });
         });
         ui.add_space(10.0);
-        theme::card().show(ui, |ui| {
-            egui::ScrollArea::vertical().id_salt("summ_rules_scr")
-                .max_height(each_h).auto_shrink([true, false])
-                .show(ui, |ui| {
+        rule_card(ui, &mut |ui| {
             if let Some(dlg) = Self::rule_section(
                 ui, "Summary Rules   -   Volume range -> Custom Summary",
                 &[("Vol Start",90.0),("Vol End",90.0),("Summary",560.0)],
                 &mut self.cfg.summ_rules, &mut self.summ_sel, RuleTarget::Summary,
             ) { self.dialog = Some(dlg); }
-                });
         });
 
             }); // Frame
