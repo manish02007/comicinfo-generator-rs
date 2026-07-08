@@ -1593,6 +1593,27 @@ impl ComicInfoApp {
 impl ComicInfoApp {
 
 
+    // Wraps a single-line text field in a horizontal ScrollArea so its
+    // content can be scrolled with the mouse wheel or a touchpad swipe
+    // while just hovering (no need to click in and use arrow keys) when
+    // the text is wider than the box. The inner TextEdit is sized to the
+    // text's own measured width -- via egui's real text layout, not an
+    // estimate -- so there's no dead scrollable space past short text.
+    // The ScrollArea itself is held to exactly `width` so the metadata
+    // grid's row-wrapping math (which assumes each field consumes exactly
+    // `width` pixels) still holds.
+    fn scrollable_text_edit(ui: &mut egui::Ui, tag: &str, val: &mut String, width: f32) -> egui::Response {
+        let font_id = egui::TextStyle::Body.resolve(ui.style());
+        let text_w = ui.fonts(|f| f.layout_no_wrap(val.clone(), font_id, Color32::WHITE).size().x);
+        let inner_w = (text_w + 18.0).max(width); // +18 ~ cursor/margin room inside TextEdit
+        egui::ScrollArea::horizontal()
+            .id_salt(("meta_field_scroll", tag))
+            .max_width(width)
+            .show(ui, |ui| {
+                ui.add(egui::TextEdit::singleline(val).desired_width(inner_w))
+            }).inner
+    }
+
     fn path_row(ui: &mut egui::Ui, label: &str, val: &mut String, tip: &str) -> bool {
         let mut clicked = false;
         ui.add_space(2.0);
@@ -1628,9 +1649,37 @@ impl ComicInfoApp {
         cols:    &[(&str, f32)],
         rows:    &[Vec<String>],
         sel:     &mut Option<usize>,
+        expand_last_to_content: bool,
     ) -> bool { // returns true if a row was double-clicked
         let mut dblclk = false;
-        let total_w: f32 = cols.iter().map(|(_,w)| w).sum::<f32>() + 12.0;
+        let last_col = cols.len().saturating_sub(1);
+        let fixed_w_except_last: f32 = cols[..last_col].iter().map(|(_, w)| w).sum();
+
+        // When expand_last_to_content, the last column is sized to the
+        // widest ACTUAL text in it (measured via egui's real text layout,
+        // not estimated) instead of stretching to fill whatever's
+        // available. The previous "stretch to fill available width"
+        // behavior caps the column at the container's width no matter how
+        // long the text is, so wrapping the table in a horizontal
+        // ScrollArea had nothing to scroll -- the column, and therefore
+        // the table, could never exceed the viewport in the first place.
+        // This makes the table genuinely wider than its container when
+        // the content needs it; the caller is expected to wrap it in a
+        // horizontal ScrollArea in that case (see rule_section).
+        let last_col_w = if expand_last_to_content {
+            let measured = rows.iter()
+                .filter_map(|r| r.get(last_col))
+                .map(|s| ui.fonts(|f| f.layout_no_wrap(
+                    s.clone(),
+                    egui::FontId::new(12.0, egui::FontFamily::Monospace),
+                    Color32::WHITE,
+                ).size().x))
+                .fold(0.0_f32, f32::max);
+            (measured + 12.0).max(cols[last_col].1)
+        } else {
+            cols[last_col].1
+        };
+        let total_w: f32 = fixed_w_except_last + last_col_w + 12.0;
 
         // Header
         let hdr_h = 24.0;
@@ -1651,9 +1700,6 @@ impl ComicInfoApp {
         // are added rather than becoming independently scrollable inside a
         // fixed-size box. The Rules tab's outer page-level ScrollArea
         // handles any eventual overall overflow instead.
-        let last_col = cols.len().saturating_sub(1);
-        let fixed_w_except_last: f32 = cols[..last_col].iter().map(|(_, w)| w).sum();
-
         ui.set_min_width(total_w);
         for (i, row) in rows.iter().enumerate() {
             let is_sel = *sel == Some(i);
@@ -1666,11 +1712,17 @@ impl ComicInfoApp {
             if resp.double_clicked() { *sel = Some(i); dblclk = true; }
             if ui.is_rect_visible(rect) {
                 ui.painter().rect_filled(rect, egui::Rounding::ZERO, bg);
-                // Last column stretches to fill whatever width is left in
-                // the actual row, instead of being capped at its spec'd
-                // width while the table sits in a much wider panel.
-                let stretch_last_w = (rect.width() - 12.0 - fixed_w_except_last)
-                    .max(cols[last_col].1);
+                // Last column either stretches to fill whatever width is
+                // left in the row (default), or uses the content-measured
+                // width computed above (expand_last_to_content) -- never
+                // re-derived from rect.width() in that case, since rect is
+                // already sized to total_w and would just hand the same
+                // value straight back.
+                let stretch_last_w = if expand_last_to_content {
+                    last_col_w
+                } else {
+                    (rect.width() - 12.0 - fixed_w_except_last).max(cols[last_col].1)
+                };
                 let mut cx = rect.left() + 6.0;
                 for (j, (_, w)) in cols.iter().enumerate() {
                     let txt = row.get(j).map(|s| s.as_str()).unwrap_or("");
@@ -1737,7 +1789,21 @@ impl ComicInfoApp {
                 }
             });
         });
-        let dbl = Self::table(ui, cols, rows, sel);
+        // Summary Rules' Summary column is wide enough to regularly get
+        // cut off at the card's edge with no way to see the rest -- a
+        // horizontal scrollbar (and mouse wheel / touchpad scrolling)
+        // fixes that. Volume/Date Rules' columns comfortably fit in
+        // practice, so they're left as plain tables rather than adding a
+        // scroll wrapper that would rarely do anything.
+        let dbl = if target == RuleTarget::Summary {
+            let mut clicked = false;
+            egui::ScrollArea::horizontal()
+                .id_salt("summ_rules_table_scroll")
+                .show(ui, |ui| { clicked = Self::table(ui, cols, rows, sel, true); });
+            clicked
+        } else {
+            Self::table(ui, cols, rows, sel, false)
+        };
         if dbl {
             if let Some(idx) = *sel {
                 if let Some(row) = rows.get(idx) {
@@ -2171,7 +2237,7 @@ impl ComicInfoApp {
                                         }).response.on_hover_text(tip);
                                 }
                                 _ => {
-                                    ui.add(egui::TextEdit::singleline(val).desired_width(width))
+                                    Self::scrollable_text_edit(ui, tag, val, width)
                                         .on_hover_text(tip);
                                 }
                             }
