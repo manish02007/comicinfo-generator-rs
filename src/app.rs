@@ -1310,85 +1310,49 @@ impl ComicInfoApp {
                         .map(String::from))
                     .collect();
 
-                egui::Window::new("Tag Order")
-                    .resizable(true).collapsible(false)
-                    .min_width(300.0)
-                    // .anchor() (used elsewhere for small transient
-                    // confirmations) explicitly disables dragging as part
-                    // of what it does -- not appropriate for this one,
-                    // since reordering tags is a longer working session
-                    // where being able to move the window out of the way
-                    // matters. default_pos only sets the starting spot.
-                    .default_pos(egui::pos2(360.0, 120.0))
-                    .show(ctx, |ui| {
-                        ui.label(RichText::new(
-                            "Drag to reorder. Controls the order tags are written to \
-                             ComicInfo.xml -- dimmed tags aren't currently in use.")
-                            .color(theme::TDIM).size(11.0));
-                        ui.add_space(4.0);
-                        ui.checkbox(&mut self.reorder_show_active_only,
-                            RichText::new("Show only tags currently in use").size(11.0));
-                        // Read after the checkbox so a click this frame is
-                        // reflected in this same frame's filtering rather
-                        // than lagging a frame behind.
-                        let show_active_only = self.reorder_show_active_only;
-                        ui.add_space(6.0);
-
-                        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                            // Filtering by skipping items entirely (egui_dnd's
-                            // own recommended approach): zero the item spacing
-                            // globally so hidden rows don't leave gaps, then
-                            // restore it right before each row that actually
-                            // renders.
-                            let normal_spacing =
-                                std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
-
-                            egui_dnd::dnd(ui, "tag_order_dnd")
-                                .show_vec(&mut self.cfg.tag_order, |ui, tag, handle, _state| {
-                                    let is_active = active.contains(tag.as_str());
-                                    if show_active_only && !is_active {
-                                        return;
-                                    }
-                                    ui.spacing_mut().item_spacing.y = normal_spacing;
-                                    let label = field_spec(tag.as_str())
-                                        .map(|s| s.label).unwrap_or(tag.as_str());
-                                    let color = if is_active { theme::TXT } else { theme::TDIM };
-                                    // Whole row is the handle -- there's nothing
-                                    // else interactive in it to conflict with.
-                                    handle.ui(ui, |ui| {
-                                        egui::Frame::none()
-                                            .fill(theme::SURF3)
-                                            .stroke(egui::Stroke::new(1.0, theme::BDR))
-                                            .rounding(egui::Rounding::same(4.0))
-                                            .inner_margin(egui::Margin::symmetric(8.0, 5.0))
-                                            .show(ui, |ui| {
-                                                ui.set_width(ui.available_width());
-                                                ui.label(RichText::new(label).size(12.0).color(color));
-                                            });
-                                    });
+                // A genuine separate OS window (egui "viewport"), not an
+                // egui::Window confined to the main app window -- so it can
+                // be dragged anywhere on screen, including entirely outside
+                // the main window, instead of blocking the view of
+                // whatever's behind it. show_viewport_immediate must be
+                // called every frame the viewport should stay visible
+                // (confirmed via egui's own maintainer guidance:
+                // github.com/emilk/egui/discussions/5306) -- satisfied
+                // here the same way the old egui::Window was kept open:
+                // self.dialog is re-set to Some(Dialog::ReorderTags) below
+                // whenever `open` is still true, so this whole arm,
+                // including this call, re-runs next frame.
+                ctx.show_viewport_immediate(
+                    egui::ViewportId::from_hash_of("tag_order_viewport"),
+                    egui::ViewportBuilder::default()
+                        .with_title("Tag Order")
+                        .with_inner_size([340.0, 480.0])
+                        .with_min_inner_size([300.0, 300.0]),
+                    |ctx, class| {
+                        // Falls back to a normal embedded egui::Window if
+                        // the backend can't give us a real OS window (per
+                        // egui's own documented fallback) -- degrades
+                        // gracefully instead of losing the dialog entirely.
+                        if class == egui::ViewportClass::Embedded {
+                            egui::Window::new("Tag Order")
+                                .resizable(true).collapsible(false)
+                                .min_width(300.0)
+                                .default_pos(egui::pos2(360.0, 120.0))
+                                .show(ctx, |ui| {
+                                    self.reorder_tags_contents(ui, &active, &mut reset, &mut set_default, &mut open);
                                 });
+                            return;
+                        }
+
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            self.reorder_tags_contents(ui, &active, &mut reset, &mut set_default, &mut open);
                         });
 
-                        ui.add_space(8.0);
-                        ui.horizontal(|ui| {
-                            if ui.add(theme::btn_secondary("Reset to Default")).clicked() {
-                                reset = true;
-                            }
-                            ui.add_space(4.0);
-                            if ui.add(theme::btn_secondary("Set as Default"))
-                                .on_hover_text(
-                                    "Save the current order as your standing preference -- \
-                                     it will be used for new sessions and survive Reset All, \
-                                     instead of reverting to the built-in schema order.")
-                                .clicked()
-                            {
-                                set_default = true;
-                            }
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                if ui.add(theme::btn_primary("  Done  ")).clicked() { open = false; }
-                            });
-                        });
-                    });
+                        if ctx.input(|i| i.viewport().close_requested()) {
+                            open = false;
+                        }
+                    },
+                );
 
                 if reset {
                     self.cfg.tag_order = default_tag_order();
@@ -1880,6 +1844,87 @@ impl ComicInfoApp {
             }
         }
         dblclk
+    }
+
+    // Body of the Tag Order dialog -- shared between the real-viewport
+    // render path (Dialog::ReorderTags's main branch) and the embedded
+    // egui::Window fallback used if the backend can't give us a real OS
+    // window. Written as a plain &mut self method (not a closure) so it
+    // can be called identically from either place without duplicating
+    // the drag-and-drop list, filter checkbox, or button row.
+    fn reorder_tags_contents(
+        &mut self,
+        ui: &mut egui::Ui,
+        active: &HashSet<String>,
+        reset: &mut bool,
+        set_default: &mut bool,
+        open: &mut bool,
+    ) {
+        ui.label(RichText::new(
+            "Drag to reorder. Controls the order tags are written to \
+             ComicInfo.xml -- dimmed tags aren't currently in use.")
+            .color(theme::TDIM).size(11.0));
+        ui.add_space(4.0);
+        ui.checkbox(&mut self.reorder_show_active_only,
+            RichText::new("Show only tags currently in use").size(11.0));
+        // Read after the checkbox so a click this frame is reflected in
+        // this same frame's filtering rather than lagging a frame behind.
+        let show_active_only = self.reorder_show_active_only;
+        ui.add_space(6.0);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            // Filtering by skipping items entirely (egui_dnd's own
+            // recommended approach): zero the item spacing globally so
+            // hidden rows don't leave gaps, then restore it right before
+            // each row that actually renders.
+            let normal_spacing =
+                std::mem::replace(&mut ui.spacing_mut().item_spacing.y, 0.0);
+
+            egui_dnd::dnd(ui, "tag_order_dnd")
+                .show_vec(&mut self.cfg.tag_order, |ui, tag, handle, _state| {
+                    let is_active = active.contains(tag.as_str());
+                    if show_active_only && !is_active {
+                        return;
+                    }
+                    ui.spacing_mut().item_spacing.y = normal_spacing;
+                    let label = field_spec(tag.as_str())
+                        .map(|s| s.label).unwrap_or(tag.as_str());
+                    let color = if is_active { theme::TXT } else { theme::TDIM };
+                    // Whole row is the handle -- there's nothing else
+                    // interactive in it to conflict with.
+                    handle.ui(ui, |ui| {
+                        egui::Frame::none()
+                            .fill(theme::SURF3)
+                            .stroke(egui::Stroke::new(1.0, theme::BDR))
+                            .rounding(egui::Rounding::same(4.0))
+                            .inner_margin(egui::Margin::symmetric(8.0, 5.0))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.label(RichText::new(label).size(12.0).color(color));
+                            });
+                    });
+                });
+        });
+
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.add(theme::btn_secondary("Reset to Default")).clicked() {
+                *reset = true;
+            }
+            ui.add_space(4.0);
+            if ui.add(theme::btn_secondary("Set as Default"))
+                .on_hover_text(
+                    "Save the current order as your standing preference -- \
+                     it will be used for new sessions and survive Reset All, \
+                     instead of reverting to the built-in schema order.")
+                .clicked()
+            {
+                *set_default = true;
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.add(theme::btn_primary("  Done  ")).clicked() { *open = false; }
+            });
+        });
     }
 
     /// Reusable rule section: title + Add/Edit/Remove buttons + table.
