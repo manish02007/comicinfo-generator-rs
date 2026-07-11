@@ -1752,7 +1752,9 @@ impl ComicInfoApp {
             let row_h = 24.0;
             let (rect, resp) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width().max(total_w), row_h), egui::Sense::click());
-            if resp.clicked()        { *sel = Some(i); }
+            if resp.clicked() {
+                *sel = if *sel == Some(i) { None } else { Some(i) };
+            }
             if resp.double_clicked() { *sel = Some(i); dblclk = true; }
             if ui.is_rect_visible(rect) {
                 ui.painter().rect_filled(rect, egui::Rounding::ZERO, bg);
