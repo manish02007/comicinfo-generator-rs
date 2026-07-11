@@ -170,6 +170,12 @@ pub struct AppSettings {
     // Play a short system sound when a batch run finishes. Useful for long
     // unattended runs where the app isn't the focused window.
     pub play_sound_on_completion: bool,
+    // The user's own saved default tag order (Tag Order dialog -> "Set as
+    // Default"), distinct from processing::default_tag_order()'s hardcoded
+    // canonical schema order. None until the user explicitly sets one.
+    // Lives here (persisted separately, survives Reset All) rather than in
+    // AppConfig, which Reset All intentionally wipes back to defaults.
+    pub preferred_tag_order: Option<Vec<String>>,
 }
 
 impl Default for AppSettings {
@@ -177,6 +183,7 @@ impl Default for AppSettings {
         Self {
             backup_before_overwrite: true,   // safety feature: on by default
             play_sound_on_completion: true,  // convenience feature: on by default, easy to disable if noisy
+            preferred_tag_order: None,
         }
     }
 }

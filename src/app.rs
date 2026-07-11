@@ -184,6 +184,12 @@ impl ComicInfoApp {
         };
         app.load_autosave();
         app.load_settings();
+        // If the user has saved a preferred tag order, it should win over
+        // AppConfig::default()'s hardcoded canonical order on a fresh
+        // start (no autosave yet) -- same reasoning as reset_all() below.
+        if let Some(order) = app.settings.preferred_tag_order.clone() {
+            app.cfg.tag_order = order;
+        }
         app.rebuild_sep_preview();
         app
     }
@@ -602,6 +608,13 @@ impl ComicInfoApp {
         // themselves -- so clear those out here specifically.
         self.cfg.volume_rules.clear();
         self.cfg.date_rules.clear();
+        // A user-saved preferred tag order (Tag Order dialog -> "Set as
+        // Default") is a deliberate standing preference, not per-job
+        // config -- Reset All shouldn't discard it any more than it
+        // discards AppSettings' other toggles.
+        if let Some(order) = self.settings.preferred_tag_order.clone() {
+            self.cfg.tag_order = order;
+        }
         self.rebuild_sep_preview();
         self.status = "Reset to defaults.".to_string();
     }
@@ -1290,6 +1303,7 @@ impl ComicInfoApp {
             Dialog::ReorderTags => {
                 let mut open = true;
                 let mut reset = false;
+                let mut set_default = false;
                 let active: HashSet<String> = self.cfg.metadata_fields.iter()
                     .map(|(t, _)| t.clone())
                     .chain(["Title", "Number", "Volume", "Summary", "Year", "Month", "Day"]
@@ -1299,7 +1313,13 @@ impl ComicInfoApp {
                 egui::Window::new("Tag Order")
                     .resizable(true).collapsible(false)
                     .min_width(300.0)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    // .anchor() (used elsewhere for small transient
+                    // confirmations) explicitly disables dragging as part
+                    // of what it does -- not appropriate for this one,
+                    // since reordering tags is a longer working session
+                    // where being able to move the window out of the way
+                    // matters. default_pos only sets the starting spot.
+                    .default_pos(egui::pos2(360.0, 120.0))
                     .show(ctx, |ui| {
                         ui.label(RichText::new(
                             "Drag to reorder. Controls the order tags are written to \
@@ -1354,6 +1374,16 @@ impl ComicInfoApp {
                             if ui.add(theme::btn_secondary("Reset to Default")).clicked() {
                                 reset = true;
                             }
+                            ui.add_space(4.0);
+                            if ui.add(theme::btn_secondary("Set as Default"))
+                                .on_hover_text(
+                                    "Save the current order as your standing preference -- \
+                                     it will be used for new sessions and survive Reset All, \
+                                     instead of reverting to the built-in schema order.")
+                                .clicked()
+                            {
+                                set_default = true;
+                            }
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 if ui.add(theme::btn_primary("  Done  ")).clicked() { open = false; }
                             });
@@ -1362,6 +1392,11 @@ impl ComicInfoApp {
 
                 if reset {
                     self.cfg.tag_order = default_tag_order();
+                }
+                if set_default {
+                    self.settings.preferred_tag_order = Some(self.cfg.tag_order.clone());
+                    self.save_settings();
+                    self.status = "Tag order saved as default.".to_string();
                 }
                 if open {
                     self.dialog = Some(Dialog::ReorderTags);
