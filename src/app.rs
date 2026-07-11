@@ -1616,6 +1616,10 @@ impl ComicInfoApp {
             // the same as before. Scoped to just this field via
             // ui.scope(), not applied globally.
             ui.style_mut().always_scroll_the_only_direction = true;
+            // Thinner scrollbar for these compact single-line fields --
+            // default is 6.0, which reads as bulky against a ~24px-tall
+            // box. Scoped to just this field via the same ui.scope().
+            ui.style_mut().spacing.scroll.bar_width = 3.0;
             egui::ScrollArea::horizontal()
                 .id_salt(("meta_field_scroll", tag))
                 .max_width(width)
@@ -1831,6 +1835,9 @@ impl ComicInfoApp {
                 // ScrollArea, which is exactly the "scrollbar appeared but
                 // scrolling does nothing" symptom.
                 ui.style_mut().always_scroll_the_only_direction = true;
+                // Same thinning as scrollable_text_edit's metadata fields
+                // -- default 6px reads as bulky against this table's rows.
+                ui.style_mut().spacing.scroll.bar_width = 3.0;
                 egui::ScrollArea::horizontal()
                     .id_salt("summ_rules_table_scroll")
                     .show(ui, |ui| { clicked = Self::table(ui, cols, rows, sel, true); });
