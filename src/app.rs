@@ -85,6 +85,9 @@ pub enum Dialog {
     Notice(String),
     ConfirmReset,
     ConfirmClearLog,
+    /// Remove clicked with nothing selected -- confirms clearing every
+    /// rule in the given table rather than silently doing nothing.
+    ConfirmClearAllRules(RuleTarget),
     /// Warns about empty constant-metadata fields before starting a run.
     EmptyFieldsWarning { fields: Vec<String>, cbzs: Vec<PathBuf> },
     /// Lists all ComicInfo schema fields not currently in metadata_fields,
@@ -1140,6 +1143,36 @@ impl ComicInfoApp {
                 else if !cancel { self.dialog = Some(Dialog::ConfirmReset); }
             }
 
+            Dialog::ConfirmClearAllRules(target) => {
+                let mut yes = false; let mut cancel = false;
+                let (name, count) = match target {
+                    RuleTarget::Volume  => ("Volume Rules",  self.cfg.volume_rules.len()),
+                    RuleTarget::Date    => ("Date Rules",    self.cfg.date_rules.len()),
+                    RuleTarget::Summary => ("Summary Rules", self.cfg.summ_rules.len()),
+                };
+                egui::Window::new("Confirm Remove").resizable(false).collapsible(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                        ui.label(format!(
+                            "No rule is selected. Remove all {count} rule(s) in {name}?\nThis cannot be undone."
+                        ));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(theme::btn_danger("  Remove All  ")).clicked() { yes = true; }
+                            ui.add_space(4.0);
+                            if ui.add(theme::btn_secondary("  Cancel  ")).clicked() { cancel = true; }
+                        });
+                    });
+                if yes {
+                    match target {
+                        RuleTarget::Volume  => { self.cfg.volume_rules.clear(); self.vol_sel  = None; }
+                        RuleTarget::Date    => { self.cfg.date_rules.clear();   self.date_sel = None; }
+                        RuleTarget::Summary => { self.cfg.summ_rules.clear();   self.summ_sel = None; }
+                    }
+                } else if !cancel {
+                    self.dialog = Some(Dialog::ConfirmClearAllRules(target));
+                }
+            }
+
             Dialog::ConfirmClearLog => {
                 let mut yes = false; let mut cancel = false;
                 egui::Window::new("Clear Log").resizable(false).collapsible(false)
@@ -1828,7 +1861,12 @@ impl ComicInfoApp {
             ui.label(RichText::new(title).color(theme::ACC2).strong().size(12.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("Remove").size(11.0).color(theme::TERR)).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR)).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
-                    if let Some(idx) = *sel { if idx < rows.len() { rows.remove(idx); } *sel = None; }
+                    if let Some(idx) = *sel {
+                        if idx < rows.len() { rows.remove(idx); }
+                        *sel = None;
+                    } else if !rows.is_empty() {
+                        pending = Some(Dialog::ConfirmClearAllRules(target));
+                    }
                 }
                 ui.add_space(2.0);
                 if ui.add(egui::Button::new(RichText::new("Edit").size(11.0).color(theme::ACC2)).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR)).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
