@@ -1310,6 +1310,25 @@ impl ComicInfoApp {
                         .map(String::from))
                     .collect();
 
+                const TAG_ORDER_SIZE: egui::Vec2 = egui::vec2(340.0, 480.0);
+                // Center on the main app window rather than leaving initial
+                // placement up to the OS -- read from the main window's own
+                // outer_rect (ctx here is still the main viewport's context;
+                // the switch to the new viewport only happens inside the
+                // nested closure below). None on the rare frame this isn't
+                // yet known (e.g. very first frame) -- ViewportBuilder
+                // simply omits with_position and the OS picks a default spot.
+                let center_pos = ctx.input(|i| i.viewport().outer_rect).map(|r| {
+                    r.center() - TAG_ORDER_SIZE / 2.0
+                });
+                let mut vp_builder = egui::ViewportBuilder::default()
+                    .with_title("Tag Order")
+                    .with_inner_size(TAG_ORDER_SIZE)
+                    .with_min_inner_size([300.0, 300.0]);
+                if let Some(pos) = center_pos {
+                    vp_builder = vp_builder.with_position(pos);
+                }
+
                 // A genuine separate OS window (egui "viewport"), not an
                 // egui::Window confined to the main app window -- so it can
                 // be dragged anywhere on screen, including entirely outside
@@ -1324,10 +1343,7 @@ impl ComicInfoApp {
                 // including this call, re-runs next frame.
                 ctx.show_viewport_immediate(
                     egui::ViewportId::from_hash_of("tag_order_viewport"),
-                    egui::ViewportBuilder::default()
-                        .with_title("Tag Order")
-                        .with_inner_size([340.0, 480.0])
-                        .with_min_inner_size([300.0, 300.0]),
+                    vp_builder,
                     |ctx, class| {
                         // Falls back to a normal embedded egui::Window if
                         // the backend can't give us a real OS window (per
@@ -1872,7 +1888,17 @@ impl ComicInfoApp {
         let show_active_only = self.reorder_show_active_only;
         ui.add_space(6.0);
 
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        // Reserve room for the button row below (its own height plus the
+        // 8px gap before it) so the scroll area never greedily claims all
+        // available height and pushes the buttons off the bottom edge --
+        // which is exactly what an uncapped ScrollArea::vertical() did
+        // here once this became a full-size OS window instead of a small
+        // popup: with nothing capping it, "available height" was the
+        // whole window, leaving nothing for what comes after it.
+        const BUTTON_ROW_H: f32 = 24.0 + 8.0;
+        let list_h = (ui.available_height() - BUTTON_ROW_H).max(80.0);
+
+        egui::ScrollArea::vertical().max_height(list_h).show(ui, |ui| {
             // Filtering by skipping items entirely (egui_dnd's own
             // recommended approach): zero the item spacing globally so
             // hidden rows don't leave gaps, then restore it right before
