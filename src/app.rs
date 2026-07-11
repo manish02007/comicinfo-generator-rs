@@ -1606,12 +1606,40 @@ impl ComicInfoApp {
         let font_id = egui::TextStyle::Body.resolve(ui.style());
         let text_w = ui.fonts(|f| f.layout_no_wrap(val.clone(), font_id, Color32::WHITE).size().x);
         let inner_w = (text_w + 18.0).max(width); // +18 ~ cursor/margin room inside TextEdit
-        egui::ScrollArea::horizontal()
-            .id_salt(("meta_field_scroll", tag))
-            .max_width(width)
-            .show(ui, |ui| {
-                ui.add(egui::TextEdit::singleline(val).desired_width(inner_w))
-            }).inner
+        ui.scope(|ui| {
+            // A horizontal-only ScrollArea only reacts to genuinely
+            // horizontal scroll input by default -- a plain vertical mouse
+            // wheel produces zero movement on that axis, so hovering and
+            // scrolling normally would do nothing at all. This makes it
+            // also accept vertical wheel input as horizontal movement,
+            // while still reading real horizontal input (touchpad swipes)
+            // the same as before. Scoped to just this field via
+            // ui.scope(), not applied globally.
+            ui.style_mut().always_scroll_the_only_direction = true;
+            egui::ScrollArea::horizontal()
+                .id_salt(("meta_field_scroll", tag))
+                .max_width(width)
+                .show(ui, |ui| {
+                    // Building the TextEdit directly in this closure would
+                    // NOT work, even with inner_w passed to desired_width:
+                    // TextEdit clamps to min(desired_width, available_
+                    // width), and available_width() here is capped to
+                    // `width` by the ScrollArea itself -- so the field
+                    // could never actually become wider than the box, and
+                    // there would be nothing to scroll to (confirmed by
+                    // tracing egui's ScrollArea source and reproducing it
+                    // in a real instrumented build). Building a genuinely
+                    // wide child Ui via UiBuilder::max_rect bypasses that
+                    // clamp entirely.
+                    let rect = egui::Rect::from_min_size(
+                        ui.cursor().min,
+                        egui::vec2(inner_w, ui.available_height().max(20.0)),
+                    );
+                    ui.allocate_new_ui(egui::UiBuilder::new().max_rect(rect), |ui| {
+                        ui.add(egui::TextEdit::singleline(val).desired_width(inner_w))
+                    }).inner
+                }).inner
+        }).inner
     }
 
     fn path_row(ui: &mut egui::Ui, label: &str, val: &mut String, tip: &str) -> bool {
@@ -1797,9 +1825,16 @@ impl ComicInfoApp {
         // scroll wrapper that would rarely do anything.
         let dbl = if target == RuleTarget::Summary {
             let mut clicked = false;
-            egui::ScrollArea::horizontal()
-                .id_salt("summ_rules_table_scroll")
-                .show(ui, |ui| { clicked = Self::table(ui, cols, rows, sel, true); });
+            ui.scope(|ui| {
+                // Same fix as scrollable_text_edit: without this, a plain
+                // vertical mouse wheel does nothing on a horizontal-only
+                // ScrollArea, which is exactly the "scrollbar appeared but
+                // scrolling does nothing" symptom.
+                ui.style_mut().always_scroll_the_only_direction = true;
+                egui::ScrollArea::horizontal()
+                    .id_salt("summ_rules_table_scroll")
+                    .show(ui, |ui| { clicked = Self::table(ui, cols, rows, sel, true); });
+            });
             clicked
         } else {
             Self::table(ui, cols, rows, sel, false)
