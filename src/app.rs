@@ -1701,11 +1701,23 @@ impl ComicInfoApp {
         let last_col_w = if expand_last_to_content {
             let measured = rows.iter()
                 .filter_map(|r| r.get(last_col))
-                .map(|s| ui.fonts(|f| f.layout_no_wrap(
-                    s.clone(),
-                    egui::FontId::new(12.0, egui::FontFamily::Monospace),
-                    Color32::WHITE,
-                ).size().x))
+                .map(|s| {
+                    // Measure the same flattened text that's actually
+                    // painted below (see the row-painting loop) -- for a
+                    // multi-line string, layout_no_wrap's width is only
+                    // its widest single line, not the full text as it
+                    // will be joined onto one line for display.
+                    let flat = if s.contains('\n') {
+                        s.split_whitespace().collect::<Vec<_>>().join(" ")
+                    } else {
+                        s.clone()
+                    };
+                    ui.fonts(|f| f.layout_no_wrap(
+                        flat,
+                        egui::FontId::new(12.0, egui::FontFamily::Monospace),
+                        Color32::WHITE,
+                    ).size().x)
+                })
                 .fold(0.0_f32, f32::max);
             (measured + 12.0).max(cols[last_col].1)
         } else {
@@ -1757,7 +1769,24 @@ impl ComicInfoApp {
                 };
                 let mut cx = rect.left() + 6.0;
                 for (j, (_, w)) in cols.iter().enumerate() {
-                    let txt = row.get(j).map(|s| s.as_str()).unwrap_or("");
+                    let raw_txt = row.get(j).map(|s| s.as_str()).unwrap_or("");
+                    // Flatten embedded newlines (and collapse the runs of
+                    // whitespace they usually leave behind, e.g. a blank
+                    // line between paragraphs) for this preview only. A
+                    // multi-line Summary painted as-is here would stack
+                    // every line on top of the others at one anchor point,
+                    // then get clipped to the row's fixed 24px height --
+                    // exactly the squished, overlapping look this avoids.
+                    // The full text with its real line breaks is
+                    // untouched everywhere else: the hover tooltip below,
+                    // and the Edit Rule dialog's textbox.
+                    let flattened;
+                    let txt: &str = if raw_txt.contains('\n') {
+                        flattened = raw_txt.split_whitespace().collect::<Vec<_>>().join(" ");
+                        &flattened
+                    } else {
+                        raw_txt
+                    };
                     let col_w = if j == last_col { stretch_last_w } else { *w };
                     // Clip text to column — rect must have positive dims or egui panics
                     let clip = egui::Rect::from_min_size(
