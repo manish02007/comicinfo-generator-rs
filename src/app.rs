@@ -2122,98 +2122,59 @@ impl ComicInfoApp {
             });
             ui.add_space(14.0);
 
-            // Processing Settings and Output Mode are both fairly compact
-            // on their own -- side by side instead of each one shrinking
-            // to its own content width and leaving the other half of the
-            // tab blank.
-            ui.columns(2, |cols| {
-                let lc = &mut cols[0];
-                egui::Frame::none().outer_margin(egui::Margin { right: 7.0, ..Default::default() }).show(lc, |ui| {
-                    theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Processing Settings");
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Max Workers:").color(theme::TDIM).size(12.0));
-                            ui.add_space(4.0);
-                            ui.add(egui::DragValue::new(&mut self.cfg.workers)
-                                .range(1..=32).speed(0.1));
-                        });
-                        ui.add_space(8.0);
-                        ui.checkbox(&mut self.cfg.dry_run,
-                            RichText::new("Dry Run  -  preview only, no files modified").size(12.0));
-                        ui.add_space(10.0);
-                        let log_path = std::env::current_dir().unwrap_or_default().join("logs");
-                        ui.label(RichText::new(format!("Log directory: {}", log_path.display()))
-                            .color(theme::TMUT).size(11.0));
+            // Output Mode is genuinely about where files get written, so
+            // it stays here alongside File Paths rather than moving to
+            // Processing with Max Workers/Dry Run (see show_processing).
+            theme::card().show(ui, |ui| {
+                theme::section_hdr(ui, "Output Mode");
+                ui.checkbox(&mut self.cfg.write_new_cbz,
+                    RichText::new("Write new CBZ  -  don't overwrite the original file").size(12.0))
+                    .on_hover_text("When off (default), the original .cbz is modified and renamed in place.\nWhen on, a new file is written and the original is left completely untouched.");
+
+                if self.cfg.write_new_cbz {
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(20.0);
+                        ui.radio_value(&mut self.cfg.output_same_path, true, "Same folder as source");
+                        ui.add_space(12.0);
+                        ui.radio_value(&mut self.cfg.output_same_path, false, "Custom folder:");
+                    });
+
+                    if !self.cfg.output_same_path {
                         ui.add_space(4.0);
-                        if ui.add(
-                            egui::Button::new(RichText::new("Open Folder").size(11.0).color(theme::TDIM))
-                                .fill(Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::new(1.0, theme::BDR))
-                                .rounding(egui::Rounding::same(4.0))
-                                .min_size(egui::vec2(0.0, 20.0))
-                        ).on_hover_text("Open the folder containing progress and error logs for past runs.").clicked() {
-                            let _ = std::fs::create_dir_all(&log_path);
-                            Self::open_in_file_manager(&log_path);
-                        }
-                    });
-                });
-
-                let rc = &mut cols[1];
-                egui::Frame::none().outer_margin(egui::Margin { left: 7.0, ..Default::default() }).show(rc, |ui| {
-                    theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Output Mode");
-                        ui.checkbox(&mut self.cfg.write_new_cbz,
-                            RichText::new("Write new CBZ  -  don't overwrite the original file").size(12.0))
-                            .on_hover_text("When off (default), the original .cbz is modified and renamed in place.\nWhen on, a new file is written and the original is left completely untouched.");
-
-                        if self.cfg.write_new_cbz {
-                            ui.add_space(8.0);
-                            ui.horizontal(|ui| {
-                                ui.add_space(20.0);
-                                ui.radio_value(&mut self.cfg.output_same_path, true, "Same folder as source");
-                            });
-                            ui.horizontal(|ui| {
-                                ui.add_space(20.0);
-                                ui.radio_value(&mut self.cfg.output_same_path, false, "Custom folder:");
-                            });
-
-                            if !self.cfg.output_same_path {
-                                ui.add_space(4.0);
-                                ui.horizontal(|ui| {
-                                    ui.add_space(20.0);
-                                    ui.label(RichText::new("Output Folder:").color(theme::TDIM).size(12.0));
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.add_space(20.0);
-                                    if ui.add(
-                                        egui::Button::new(RichText::new("Browse").size(11.5).color(theme::TXT))
-                                            .fill(theme::SURF3)
-                                            .stroke(egui::Stroke::new(1.0, theme::BDR))
-                                            .rounding(egui::Rounding::same(5.0))
-                                            .min_size(egui::vec2(74.0, 26.0))
-                                    ).clicked() {
-                                        self.start_pick(PathPick::OutputPath);
-                                    }
-                                    ui.add_space(6.0);
-                                    ui.add(
-                                        egui::TextEdit::singleline(&mut self.cfg.output_path)
-                                            .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
-                                            .hint_text("Browse or type a folder path...")
-                                            .desired_width(f32::INFINITY)
-                                    ).on_hover_text("New CBZ files are written here instead of the source folder.");
-                                });
-                                if self.cfg.output_path.trim().is_empty() {
-                                    ui.add_space(4.0);
-                                    ui.horizontal(|ui| {
-                                        ui.add_space(20.0);
-                                        ui.label(RichText::new("Choose a folder, or switch back to \"Same folder as source\".")
-                                            .color(theme::TWARN).size(11.0));
-                                    });
+                        ui.horizontal(|ui| {
+                            ui.add_space(20.0);
+                            ui.add_sized([108.0, 26.0], egui::Label::new(
+                                RichText::new("Output Folder:").color(theme::TDIM).size(12.0)
+                            ));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.add(
+                                    egui::Button::new(RichText::new("Browse").size(11.5).color(theme::TXT))
+                                        .fill(theme::SURF3)
+                                        .stroke(egui::Stroke::new(1.0, theme::BDR))
+                                        .rounding(egui::Rounding::same(5.0))
+                                        .min_size(egui::vec2(74.0, 26.0))
+                                ).clicked() {
+                                    self.start_pick(PathPick::OutputPath);
                                 }
-                            }
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.cfg.output_path)
+                                        .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
+                                        .hint_text("Browse or type a folder path...")
+                                        .desired_width(f32::INFINITY)
+                                ).on_hover_text("New CBZ files are written here instead of the source folder.");
+                            });
+                        });
+                        if self.cfg.output_path.trim().is_empty() {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.add_space(20.0);
+                                ui.label(RichText::new("Choose a folder, or switch back to \"Same folder as source\".")
+                                    .color(theme::TWARN).size(11.0));
+                            });
                         }
-                    });
-                });
+                    }
+                }
             });
 
                 }); // Frame
@@ -2281,6 +2242,39 @@ impl ComicInfoApp {
                                     .font(egui::FontId::new(12.0, egui::FontFamily::Monospace)));
                             });
                         });
+                    });
+                    ui.add_space(10.0);
+                    // Processing Settings -- moved here from the Paths tab.
+                    // Max Workers, Dry Run, and the log folder are genuine
+                    // processing concerns; they ended up in Paths only
+                    // because that tab's layout needed a second card to
+                    // fill out a column, not because they belonged there.
+                    theme::card().show(ui, |ui| {
+                        theme::section_hdr(ui, "Processing Settings");
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Max Workers:").color(theme::TDIM).size(12.0));
+                            ui.add_space(4.0);
+                            ui.add(egui::DragValue::new(&mut self.cfg.workers)
+                                .range(1..=32).speed(0.1));
+                        });
+                        ui.add_space(8.0);
+                        ui.checkbox(&mut self.cfg.dry_run,
+                            RichText::new("Dry Run  -  preview only, no files modified").size(12.0));
+                        ui.add_space(10.0);
+                        let log_path = std::env::current_dir().unwrap_or_default().join("logs");
+                        ui.label(RichText::new(format!("Log directory: {}", log_path.display()))
+                            .color(theme::TMUT).size(11.0));
+                        ui.add_space(4.0);
+                        if ui.add(
+                            egui::Button::new(RichText::new("Open Folder").size(11.0).color(theme::TDIM))
+                                .fill(Color32::TRANSPARENT)
+                                .stroke(egui::Stroke::new(1.0, theme::BDR))
+                                .rounding(egui::Rounding::same(4.0))
+                                .min_size(egui::vec2(0.0, 20.0))
+                        ).on_hover_text("Open the folder containing progress and error logs for past runs.").clicked() {
+                            let _ = std::fs::create_dir_all(&log_path);
+                            Self::open_in_file_manager(&log_path);
+                        }
                     });
                 });
 
