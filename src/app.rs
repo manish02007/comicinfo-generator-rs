@@ -100,7 +100,7 @@ pub enum Dialog {
 }
 
 #[derive(Debug, Clone)]
-pub enum PathPick { Folder, ChJson, VolJson, DateJson, LoadConfig, SaveConfig(String), ImportMeta, OutputPath }
+pub enum PathPick { Folder, TitlesJson, DateJson, LoadConfig, SaveConfig(String), ImportMeta, OutputPath }
 
 #[derive(Default, Clone)]
 pub struct DisplayStats {
@@ -715,7 +715,7 @@ impl ComicInfoApp {
             let res = match &k {
                 PathPick::Folder | PathPick::OutputPath => rfd::FileDialog::new().pick_folder(),
                 PathPick::ImportMeta |
-                PathPick::ChJson | PathPick::VolJson | PathPick::DateJson =>
+                PathPick::TitlesJson | PathPick::DateJson =>
                     rfd::FileDialog::new().add_filter("JSON / Python", &["json","py"]).pick_file(),
                 PathPick::LoadConfig =>
                     rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file(),
@@ -740,8 +740,7 @@ impl ComicInfoApp {
         let Some(path) = result else { self.pick_kind = None; return; };
         match self.pick_kind.take() {
             Some(PathPick::Folder)    => { self.cfg.folder = path.to_string_lossy().into(); self.rebuild_sep_preview(); }
-            Some(PathPick::ChJson)    => self.cfg.ch_json   = path.to_string_lossy().into(),
-            Some(PathPick::VolJson)   => self.cfg.vol_json  = path.to_string_lossy().into(),
+            Some(PathPick::TitlesJson) => self.cfg.titles_json = path.to_string_lossy().into(),
             Some(PathPick::DateJson)  => self.cfg.date_json = path.to_string_lossy().into(),
             Some(PathPick::LoadConfig) => self.load_config(&path),
             Some(PathPick::SaveConfig(_)) => {
@@ -839,6 +838,10 @@ impl ComicInfoApp {
         progress_file:   PathBuf,
         error_log_file:  PathBuf,
     ) -> WorkerConfig {
+        // Loaded once and cloned below for both chapter_titles and
+        // volume_titles (see AppConfig::titles_json) -- avoids reading
+        // the same file from disk twice per run.
+        let titles = safe_json_load(&self.cfg.titles_json);
         WorkerConfig {
             dry_run: self.cfg.dry_run,
             write_new_cbz: self.cfg.write_new_cbz,
@@ -858,8 +861,12 @@ impl ComicInfoApp {
             volume_rules:  self.cfg.volume_rules.clone(),
             date_rules:    self.cfg.date_rules.clone(),
             summ_rules:    self.cfg.summ_rules.clone(),
-            chapter_titles: safe_json_load(&self.cfg.ch_json),
-            volume_titles:  safe_json_load(&self.cfg.vol_json),
+            // Both use the same merged data (see AppConfig::titles_json)
+            // -- worker.rs still branches on which map to consult
+            // per-file based on numbering mode, this only unifies where
+            // the data comes from.
+            chapter_titles: titles.clone(),
+            volume_titles:  titles,
             dates_json:     safe_json_load(&self.cfg.date_json),
             max_workers: self.cfg.workers,
             processed_files, resume_mode,
@@ -997,7 +1004,7 @@ impl ComicInfoApp {
     }
 
     fn check_finale(&mut self, cbzs: Vec<PathBuf>, done: HashSet<String>, resume: bool) {
-        let titles = safe_json_load(&self.cfg.ch_json);
+        let titles = safe_json_load(&self.cfg.titles_json);
         let mut nums: Vec<(f64, usize, String)> = Vec::new();
         for (i, p) in cbzs.iter().enumerate() {
             let n = p.file_name().unwrap_or_default().to_string_lossy().to_string();
@@ -2110,11 +2117,9 @@ impl ComicInfoApp {
                 if Self::path_row(ui, "CBZ Folder:", &mut self.cfg.folder, "Folder containing the .cbz files.") {
                     self.start_pick(PathPick::Folder);
                 }
-                if Self::path_row(ui, "Chapter Titles JSON:", &mut self.cfg.ch_json, r#"{"1":"Title","2":"..."}"#) {
-                    self.start_pick(PathPick::ChJson);
-                }
-                if Self::path_row(ui, "Volume Titles JSON:", &mut self.cfg.vol_json, r#"{"1":"Vol 1 Title"}"#) {
-                    self.start_pick(PathPick::VolJson);
+                if Self::path_row(ui, "Titles JSON:", &mut self.cfg.titles_json,
+                    r#"{"1":"Chapter/Episode or Volume Title","2":"..."}"#) {
+                    self.start_pick(PathPick::TitlesJson);
                 }
                 if Self::path_row(ui, "Episode Dates JSON:", &mut self.cfg.date_json, r#"{"1":"Jul 25, 2019"}"#) {
                     self.start_pick(PathPick::DateJson);

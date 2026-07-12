@@ -44,8 +44,13 @@ pub struct AppConfig {
     pub config_version: u32,
     // Paths
     pub folder:   String,
-    pub ch_json:  String,
-    pub vol_json: String,
+    // Single titles JSON, used as BOTH chapter_titles and volume_titles
+    // (see worker.rs) -- the two were previously separate fields/files,
+    // but chapter_titles.json and volume_titles.json are structurally
+    // identical {"number": "title"} maps, and a series is realistically
+    // numbered by either chapters or volumes, never both with different
+    // titles at once. One field covers both without losing anything.
+    pub titles_json: String,
     pub date_json:String,
     // Config
     pub workers: usize,
@@ -105,8 +110,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             config_version: CURRENT_CONFIG_VERSION,
-            folder: String::new(), ch_json: String::new(),
-            vol_json: String::new(), date_json: String::new(),
+            folder: String::new(), titles_json: String::new(),
+            date_json: String::new(),
             workers: 4, dry_run: false,
             write_new_cbz: false, output_same_path: true, output_path: String::new(),
             mode: ComicMode::Manga,

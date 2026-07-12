@@ -283,7 +283,11 @@ fn process_one(
     // filename -- the "New filename" step below keeps the original name
     // untouched (sanitized only), and ComicInfo.xml's Title matches it.
     let titles = if mode_str == "volume" { &cfg.volume_titles } else { &cfg.chapter_titles };
-    let titles_kind = if mode_str == "volume" { "volume_titles.json" } else { "chapter_titles.json" };
+    // Both chapter_titles and volume_titles are populated from the same
+    // single titles JSON file (see app.rs::make_worker_cfg) -- there's no
+    // longer a separate chapter_titles.json/volume_titles.json to name
+    // distinctly here.
+    let titles_kind = "titles JSON";
     let json_entry = titles.get(&orig_num).or_else(|| titles.get(&number));
     let has_reliable_title = json_entry.map_or(false, |t| !t.is_empty());
 
