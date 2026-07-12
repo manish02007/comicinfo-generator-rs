@@ -1036,15 +1036,19 @@ impl ComicInfoApp {
         match dlg {
             Dialog::EditRule(mut s) => {
                 let mut saved = false; let mut cancelled = false;
-                // Range-validity check only -- not "must be numeric" in
-                // general, since some columns (Volume label, Summary
-                // text) are free text by design. Specifically the first
-                // two columns (Ch/Vol Start and End) must be present and
-                // parse as a number, because find_volume/find_date/
-                // find_summary fall back to f64::MAX/MIN for anything
-                // that doesn't parse -- an empty or non-numeric range
-                // silently produces a rule that can never match any
-                // chapter/volume, rather than an error at save time.
+                // "Same as Start" only makes sense for Date/Summary rules
+                // (their range is Vol Start -> Vol End). Volume rules map
+                // a CHAPTER range to a single volume number -- a
+                // different shape entirely, no Start==End concept here.
+                let same_start_end_applicable = matches!(s.target, RuleTarget::Date | RuleTarget::Summary);
+                // Reflects the CURRENT saved state (both fields equal and
+                // non-empty), not a separate flag -- so re-opening a rule
+                // that was saved with matching Start/End correctly starts
+                // with the checkbox already ticked, and there's only ever
+                // one source of truth (the two values themselves).
+                let mut same_start_end = same_start_end_applicable
+                    && s.values.get(0).zip(s.values.get(1)).map_or(false, |(a, b)| a == b && !a.trim().is_empty());
+
                 let range_valid = s.values.get(0).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
                     && s.values.get(1).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok());
 
@@ -1052,13 +1056,40 @@ impl ComicInfoApp {
                     .resizable(true).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
+                        if same_start_end_applicable {
+                            if ui.checkbox(&mut same_start_end, "Vol Start and Vol End are the same").changed() && same_start_end {
+                                // Ticking it immediately syncs End to
+                                // Start's current value, rather than
+                                // waiting for the next edit to Start.
+                                if let Some(start_val) = s.values.get(0).cloned() {
+                                    if let Some(end_val) = s.values.get_mut(1) { *end_val = start_val; }
+                                }
+                            }
+                            ui.add_space(6.0);
+                        }
                         egui::Grid::new("re_g").num_columns(2).spacing([8.0,6.0]).show(ui, |ui| {
                             for (i, lbl) in s.labels.iter().enumerate() {
-                                ui.label(RichText::new(lbl.as_str()).color(theme::TXT));
+                                // With Same ticked, Start's row is relabeled
+                                // "Vol No." and End's row is skipped
+                                // entirely -- one field instead of two,
+                                // rather than showing both with End
+                                // disabled/greyed (which would still look
+                                // like 2 fields, just one of them inert).
+                                if same_start_end && i == 1 { continue; }
+                                let display_label = if same_start_end && i == 0 { "Vol No." } else { lbl.as_str() };
+                                ui.label(RichText::new(display_label).color(theme::TXT));
                                 if lbl.to_lowercase().contains("summary") {
                                     ui.add(egui::TextEdit::multiline(&mut s.values[i]).desired_rows(4).desired_width(420.0));
                                 } else {
-                                    ui.add(egui::TextEdit::singleline(&mut s.values[i]).desired_width(280.0));
+                                    let r = ui.add(egui::TextEdit::singleline(&mut s.values[i]).desired_width(280.0));
+                                    // Keep End mirrored to Start live while
+                                    // Same is ticked, so a mid-edit Save
+                                    // (or just re-reading the fields
+                                    // afterward) never sees them diverge.
+                                    if same_start_end && i == 0 && r.changed() {
+                                        let start_val = s.values[0].clone();
+                                        if let Some(end_val) = s.values.get_mut(1) { *end_val = start_val; }
+                                    }
                                 }
                                 ui.end_row();
                             }
@@ -1788,6 +1819,7 @@ impl ComicInfoApp {
         rows:    &[Vec<String>],
         sel:     &mut Option<usize>,
         expand_last_to_content: bool,
+        merge_equal_start_end: bool,
     ) -> bool { // returns true if a row was double-clicked
         let mut dblclk = false;
         let last_col = cols.len().saturating_sub(1);
@@ -1875,8 +1907,35 @@ impl ComicInfoApp {
                 } else {
                     (rect.width() - 12.0 - fixed_w_except_last).max(cols[last_col].1)
                 };
+                // When this row's Start and End are equal (the "Vol Start
+                // and Vol End are the same" checkbox in Edit Rule), show
+                // the shared value once spanning both columns' width
+                // instead of painting it twice side by side -- the header
+                // still reads "Vol Start" / "Vol End" (this is a per-row
+                // display simplification, not a change to the table's
+                // fixed column schema, since other rows in the same table
+                // may have genuinely different Start/End values).
+                let row_start_end_equal = merge_equal_start_end
+                    && cols.len() >= 2
+                    && row.get(0).zip(row.get(1)).map_or(false, |(a, b)| a == b && !a.trim().is_empty());
+
                 let mut cx = rect.left() + 6.0;
-                for (j, (_, w)) in cols.iter().enumerate() {
+                let mut j = 0;
+                while j < cols.len() {
+                    if row_start_end_equal && j == 1 {
+                        // Column 1 (End) is already accounted for: column
+                        // 0 painted its cell at the COMBINED width
+                        // (w + cols[1].1) and cx was advanced by that
+                        // combined amount already. This branch only skips
+                        // painting a duplicate cell for column 1 -- cx
+                        // must NOT be advanced again here, or every column
+                        // after the merged pair would land 90px too far
+                        // right (confirmed by a standalone position test
+                        // before this fix).
+                        j += 1;
+                        continue;
+                    }
+                    let (_, w) = cols[j];
                     let raw_txt = row.get(j).map(|s| s.as_str()).unwrap_or("");
                     // Flatten embedded newlines (and collapse the runs of
                     // whitespace they usually leave behind, e.g. a blank
@@ -1895,7 +1954,17 @@ impl ComicInfoApp {
                     } else {
                         raw_txt
                     };
-                    let col_w = if j == last_col { stretch_last_w } else { *w };
+                    // Column 0 (Start) spans both its own and column 1's
+                    // (End's) width when merged, since the painted text
+                    // for the shared value should visually occupy the
+                    // same total space the two separate cells would have.
+                    let col_w = if j == last_col {
+                        stretch_last_w
+                    } else if row_start_end_equal && j == 0 {
+                        w + cols[1].1
+                    } else {
+                        w
+                    };
                     // Clip text to column — rect must have positive dims or egui panics
                     let clip = egui::Rect::from_min_size(
                         egui::pos2(cx, rect.top()),
@@ -1907,6 +1976,7 @@ impl ComicInfoApp {
                         egui::FontId::new(12.0, egui::FontFamily::Monospace), tc,
                     );
                     cx += col_w;
+                    j += 1;
                 }
             }
             // Hover over any row to read its full, untruncated last-column
@@ -2062,6 +2132,12 @@ impl ComicInfoApp {
         // fixes that. Volume/Date Rules' columns comfortably fit in
         // practice, so they're left as plain tables rather than adding a
         // scroll wrapper that would rarely do anything.
+        // Date and Summary rules both have the "Vol Start / Vol End"
+        // shape, so a row saved with the "same" checkbox ticked should
+        // display merged in either table. Volume rules map a chapter
+        // range to a single volume number -- a different shape with no
+        // Start==End concept -- so merging never applies there.
+        let merge_start_end = matches!(target, RuleTarget::Date | RuleTarget::Summary);
         let dbl = if target == RuleTarget::Summary {
             let mut clicked = false;
             ui.scope(|ui| {
@@ -2075,11 +2151,11 @@ impl ComicInfoApp {
                 ui.style_mut().spacing.scroll.bar_width = 3.0;
                 egui::ScrollArea::horizontal()
                     .id_salt("summ_rules_table_scroll")
-                    .show(ui, |ui| { clicked = Self::table(ui, cols, rows, sel, true); });
+                    .show(ui, |ui| { clicked = Self::table(ui, cols, rows, sel, true, merge_start_end); });
             });
             clicked
         } else {
-            Self::table(ui, cols, rows, sel, false)
+            Self::table(ui, cols, rows, sel, false, merge_start_end)
         };
         if dbl {
             if let Some(idx) = *sel {
