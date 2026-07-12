@@ -1850,7 +1850,6 @@ impl ComicInfoApp {
         rows:    &[Vec<String>],
         sel:     &mut Option<usize>,
         expand_last_to_content: bool,
-        merge_equal_start_end: bool,
     ) -> bool { // returns true if a row was double-clicked
         let mut dblclk = false;
         let last_col = cols.len().saturating_sub(1);
@@ -1938,35 +1937,8 @@ impl ComicInfoApp {
                 } else {
                     (rect.width() - 12.0 - fixed_w_except_last).max(cols[last_col].1)
                 };
-                // When this row's Start and End are equal (the "Vol Start
-                // and Vol End are the same" checkbox in Edit Rule), show
-                // the shared value once spanning both columns' width
-                // instead of painting it twice side by side -- the header
-                // still reads "Vol Start" / "Vol End" (this is a per-row
-                // display simplification, not a change to the table's
-                // fixed column schema, since other rows in the same table
-                // may have genuinely different Start/End values).
-                let row_start_end_equal = merge_equal_start_end
-                    && cols.len() >= 2
-                    && row.get(0).zip(row.get(1)).map_or(false, |(a, b)| a == b && !a.trim().is_empty());
-
                 let mut cx = rect.left() + 6.0;
-                let mut j = 0;
-                while j < cols.len() {
-                    if row_start_end_equal && j == 1 {
-                        // Column 1 (End) is already accounted for: column
-                        // 0 painted its cell at the COMBINED width
-                        // (w + cols[1].1) and cx was advanced by that
-                        // combined amount already. This branch only skips
-                        // painting a duplicate cell for column 1 -- cx
-                        // must NOT be advanced again here, or every column
-                        // after the merged pair would land 90px too far
-                        // right (confirmed by a standalone position test
-                        // before this fix).
-                        j += 1;
-                        continue;
-                    }
-                    let (_, w) = cols[j];
+                for (j, (_, w)) in cols.iter().enumerate() {
                     let raw_txt = row.get(j).map(|s| s.as_str()).unwrap_or("");
                     // Flatten embedded newlines (and collapse the runs of
                     // whitespace they usually leave behind, e.g. a blank
@@ -1985,17 +1957,7 @@ impl ComicInfoApp {
                     } else {
                         raw_txt
                     };
-                    // Column 0 (Start) spans both its own and column 1's
-                    // (End's) width when merged, since the painted text
-                    // for the shared value should visually occupy the
-                    // same total space the two separate cells would have.
-                    let col_w = if j == last_col {
-                        stretch_last_w
-                    } else if row_start_end_equal && j == 0 {
-                        w + cols[1].1
-                    } else {
-                        w
-                    };
+                    let col_w = if j == last_col { stretch_last_w } else { *w };
                     // Clip text to column — rect must have positive dims or egui panics
                     let clip = egui::Rect::from_min_size(
                         egui::pos2(cx, rect.top()),
@@ -2007,7 +1969,6 @@ impl ComicInfoApp {
                         egui::FontId::new(12.0, egui::FontFamily::Monospace), tc,
                     );
                     cx += col_w;
-                    j += 1;
                 }
             }
             // Hover over any row to read its full, untruncated last-column
@@ -2173,12 +2134,6 @@ impl ComicInfoApp {
         // fixes that. Volume/Date Rules' columns comfortably fit in
         // practice, so they're left as plain tables rather than adding a
         // scroll wrapper that would rarely do anything.
-        // Date and Summary rules both have the "Vol Start / Vol End"
-        // shape, so a row saved with the "same" checkbox ticked should
-        // display merged in either table. Volume rules map a chapter
-        // range to a single volume number -- a different shape with no
-        // Start==End concept -- so merging never applies there.
-        let merge_start_end = matches!(target, RuleTarget::Date | RuleTarget::Summary);
         let dbl = if target == RuleTarget::Summary {
             let mut clicked = false;
             ui.scope(|ui| {
@@ -2192,11 +2147,11 @@ impl ComicInfoApp {
                 ui.style_mut().spacing.scroll.bar_width = 3.0;
                 egui::ScrollArea::horizontal()
                     .id_salt("summ_rules_table_scroll")
-                    .show(ui, |ui| { clicked = Self::table(ui, cols, rows, sel, true, merge_start_end); });
+                    .show(ui, |ui| { clicked = Self::table(ui, cols, rows, sel, true); });
             });
             clicked
         } else {
-            Self::table(ui, cols, rows, sel, false, merge_start_end)
+            Self::table(ui, cols, rows, sel, false)
         };
         if dbl {
             if let Some(idx) = *sel {
