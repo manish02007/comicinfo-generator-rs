@@ -65,6 +65,17 @@ pub struct RuleEditState {
     pub labels:  Vec<String>,
     pub values:  Vec<String>,
     pub is_new:  bool,
+    // "Vol Start and Vol End are the same" checkbox state (Date/Summary
+    // rules only). A REAL piece of state, not re-derived each frame from
+    // whether values[0]==values[1] and non-empty -- deriving it from the
+    // values meant ticking the checkbox with a blank Vol Start did
+    // nothing, since "" == "" was deliberately excluded from counting as
+    // "same" (to avoid two blank fields looking pre-merged). The checkbox
+    // now controls the field layout directly regardless of what's typed;
+    // only the STARTING value (when the dialog opens) is derived from
+    // the existing values, as a sensible default for re-opening a
+    // previously-saved matching-range rule.
+    pub same_start_end: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1041,26 +1052,41 @@ impl ComicInfoApp {
                 // a CHAPTER range to a single volume number -- a
                 // different shape entirely, no Start==End concept here.
                 let same_start_end_applicable = matches!(s.target, RuleTarget::Date | RuleTarget::Summary);
-                // Reflects the CURRENT saved state (both fields equal and
-                // non-empty), not a separate flag -- so re-opening a rule
-                // that was saved with matching Start/End correctly starts
-                // with the checkbox already ticked, and there's only ever
-                // one source of truth (the two values themselves).
-                let mut same_start_end = same_start_end_applicable
-                    && s.values.get(0).zip(s.values.get(1)).map_or(false, |(a, b)| a == b && !a.trim().is_empty());
 
-                let range_valid = s.values.get(0).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
-                    && s.values.get(1).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok());
+                // Validated in terms of whichever field(s) are actually
+                // showing: with Same ticked, only Vol No. (values[0])
+                // needs a value -- values[1] is a mirrored copy, not
+                // something the person can see or edit right now, so it
+                // shouldn't gate Save or appear in the error message.
+                let range_valid = if same_start_end_applicable && s.same_start_end {
+                    s.values.get(0).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
+                } else {
+                    s.values.get(0).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
+                        && s.values.get(1).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
+                };
 
                 egui::Window::new(if s.is_new { "Add Rule" } else { "Edit Rule" })
                     .resizable(true).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
                         if same_start_end_applicable {
-                            if ui.checkbox(&mut same_start_end, "Vol Start and Vol End are the same").changed() && same_start_end {
+                            // s.same_start_end is real, persistent state
+                            // on RuleEditState -- NOT re-derived each
+                            // frame from whether values[0]==values[1] and
+                            // non-empty. That derivation was the actual
+                            // bug: ticking the checkbox with a blank Vol
+                            // Start did nothing, since "" wasn't allowed
+                            // to count as "same" (to avoid two blank
+                            // fields defaulting to looking pre-merged),
+                            // which meant the checkbox's own ticked state
+                            // and the layout it should control were
+                            // silently out of sync. The checkbox now
+                            // drives the layout directly, unconditionally.
+                            if ui.checkbox(&mut s.same_start_end, "Vol Start and Vol End are the same").changed() && s.same_start_end {
                                 // Ticking it immediately syncs End to
-                                // Start's current value, rather than
-                                // waiting for the next edit to Start.
+                                // Start's current value (even if that's
+                                // blank), rather than waiting for the
+                                // next edit to Start.
                                 if let Some(start_val) = s.values.get(0).cloned() {
                                     if let Some(end_val) = s.values.get_mut(1) { *end_val = start_val; }
                                 }
@@ -1075,8 +1101,8 @@ impl ComicInfoApp {
                                 // rather than showing both with End
                                 // disabled/greyed (which would still look
                                 // like 2 fields, just one of them inert).
-                                if same_start_end && i == 1 { continue; }
-                                let display_label = if same_start_end && i == 0 { "Vol No." } else { lbl.as_str() };
+                                if s.same_start_end && i == 1 { continue; }
+                                let display_label = if s.same_start_end && i == 0 { "Vol No." } else { lbl.as_str() };
                                 ui.label(RichText::new(display_label).color(theme::TXT));
                                 if lbl.to_lowercase().contains("summary") {
                                     ui.add(egui::TextEdit::multiline(&mut s.values[i]).desired_rows(4).desired_width(420.0));
@@ -1086,7 +1112,7 @@ impl ComicInfoApp {
                                     // Same is ticked, so a mid-edit Save
                                     // (or just re-reading the fields
                                     // afterward) never sees them diverge.
-                                    if same_start_end && i == 0 && r.changed() {
+                                    if s.same_start_end && i == 0 && r.changed() {
                                         let start_val = s.values[0].clone();
                                         if let Some(end_val) = s.values.get_mut(1) { *end_val = start_val; }
                                     }
@@ -1096,11 +1122,16 @@ impl ComicInfoApp {
                         });
                         if !range_valid {
                             ui.add_space(4.0);
-                            ui.label(RichText::new(format!(
-                                "{} and {} are required and must be numbers.",
-                                s.labels.first().map(String::as_str).unwrap_or("Start"),
-                                s.labels.get(1).map(String::as_str).unwrap_or("End"),
-                            )).color(theme::TERR).size(11.0));
+                            let msg = if same_start_end_applicable && s.same_start_end {
+                                "Vol No. is required and must be a number.".to_string()
+                            } else {
+                                format!(
+                                    "{} and {} are required and must be numbers.",
+                                    s.labels.first().map(String::as_str).unwrap_or("Start"),
+                                    s.labels.get(1).map(String::as_str).unwrap_or("End"),
+                                )
+                            };
+                            ui.label(RichText::new(msg).color(theme::TERR).size(11.0));
                         }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
@@ -2108,10 +2139,19 @@ impl ComicInfoApp {
                 if ui.add(egui::Button::new(RichText::new("Edit").size(11.0).color(theme::ACC2)).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR)).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
                     if let Some(idx) = *sel {
                         if let Some(row) = rows.get(idx) {
+                            let vals = padded(row, cols.len());
+                            // Starting value only -- reflects what this
+                            // specific saved row actually has, as a
+                            // sensible default. From here on the checkbox
+                            // is independent, real state (see
+                            // RuleEditState::same_start_end).
+                            let same_start_end = matches!(target, RuleTarget::Date | RuleTarget::Summary)
+                                && vals.get(0).zip(vals.get(1)).map_or(false, |(a, b)| a == b && !a.trim().is_empty());
                             pending = Some(Dialog::EditRule(RuleEditState {
                                 target, row_idx: Some(idx), is_new: false,
                                 labels: cols.iter().map(|(h,_)| h.to_string()).collect(),
-                                values: padded(row, cols.len()),
+                                values: vals,
+                                same_start_end,
                             }));
                         }
                     }
@@ -2122,6 +2162,7 @@ impl ComicInfoApp {
                         target, row_idx: None, is_new: true,
                         labels: cols.iter().map(|(h,_)| h.to_string()).collect(),
                         values: vec![String::new(); cols.len()],
+                        same_start_end: false, // fresh rule always starts with 2 separate fields
                     }));
                 }
             });
@@ -2160,10 +2201,14 @@ impl ComicInfoApp {
         if dbl {
             if let Some(idx) = *sel {
                 if let Some(row) = rows.get(idx) {
+                    let vals = padded(row, cols.len());
+                    let same_start_end = matches!(target, RuleTarget::Date | RuleTarget::Summary)
+                        && vals.get(0).zip(vals.get(1)).map_or(false, |(a, b)| a == b && !a.trim().is_empty());
                     pending = Some(Dialog::EditRule(RuleEditState {
                         target, row_idx: Some(idx), is_new: false,
                         labels: cols.iter().map(|(h,_)| h.to_string()).collect(),
-                        values: padded(row, cols.len()),
+                        values: vals,
+                        same_start_end,
                     }));
                 }
             }
