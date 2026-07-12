@@ -2147,7 +2147,8 @@ impl ComicInfoApp {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         ui.add_space(20.0);
-                        ui.radio_value(&mut self.cfg.output_same_path, true, "Same folder as source");
+                        ui.radio_value(&mut self.cfg.output_same_path, true, "Subfolder next to source")
+                            .on_hover_text("Writes into an \"output\" folder created inside the source folder --\nnot directly into the source folder itself, so the new file can\nnever end up overwriting the original by sharing its name.");
                         ui.add_space(12.0);
                         ui.radio_value(&mut self.cfg.output_same_path, false, "Custom folder:");
                     });
@@ -2181,7 +2182,7 @@ impl ComicInfoApp {
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
                                 ui.add_space(20.0);
-                                ui.label(RichText::new("Choose a folder, or switch back to \"Same folder as source\".")
+                                ui.label(RichText::new("Choose a folder, or switch back to \"Subfolder next to source\".")
                                     .color(theme::TWARN).size(11.0));
                             });
                         }

@@ -470,12 +470,23 @@ fn process_one(
     // - default (write_new_cbz=false): same folder as the source, then
     //   renamed in place after writing -- unchanged from every previous
     //   version of this app.
-    // - write_new_cbz=true: either the same folder (output_same_path) or a
-    //   user-chosen custom folder (output_path). The file is written
-    //   DIRECTLY to its final title-based name at that destination in one
-    //   step; the source file is never touched, renamed, or modified.
+    // - write_new_cbz=true, custom folder (output_path): the user-chosen
+    //   folder, written directly.
+    // - write_new_cbz=true, "same folder as source" (output_same_path):
+    //   a subfolder INSIDE the source folder, not the source folder
+    //   itself. Writing directly into the source folder used the exact
+    //   same name-computation as the in-place-rename path, so whenever
+    //   the computed name happened to equal the original filename (the
+    //   common case -- no reliable title means the name doesn't change
+    //   at all), the "new" file silently overwrote the original in
+    //   place, defeating the entire point of write_new_cbz ("don't
+    //   overwrite the original file"). A subfolder makes that name
+    //   collision structurally impossible rather than relying on names
+    //   happening to differ.
     let output_dir = if cfg.write_new_cbz && !cfg.output_same_path {
         PathBuf::from(&cfg.output_path)
+    } else if cfg.write_new_cbz {
+        path.parent().unwrap_or(Path::new(".")).join("output")
     } else {
         path.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
