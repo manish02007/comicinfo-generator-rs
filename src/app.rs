@@ -683,6 +683,20 @@ impl ComicInfoApp {
             "volume"  => "Volume".into(),
             _         => pfx,
         };
+        // Zero-padding, matching worker.rs's exact behavior: skipped for
+        // decimal numbers (e.g. "5.5" stays as-is), applied to whole
+        // numbers using pad_width. Deliberately does NOT reflect
+        // worker.rs's separate auto-detected padding width (inferred from
+        // existing filenames in the folder) -- that's a background
+        // heuristic the Processing tab has no visible control for, and
+        // making the preview depend on it would make it track something
+        // other than the Zero-Padding toggle/width sitting right next to
+        // this preview.
+        if self.cfg.zero_pad && !num.contains('.') {
+            if let Ok(n) = num.parse::<u64>() {
+                num = format!("{n:0>width$}", width = self.cfg.pad_width);
+            }
+        }
         self.sep_preview = if self.cfg.csep_on && !self.cfg.csep.is_empty() {
             format!("{chosen} {num} {} My Title", self.cfg.csep.trim())
         } else {
@@ -2318,11 +2332,15 @@ impl ComicInfoApp {
                     // Zero-pad
                     theme::card().show(ui, |ui| {
                         theme::section_hdr(ui, "Zero-Padding");
-                        ui.checkbox(&mut self.cfg.zero_pad, RichText::new("Zero-pad numbers  (e.g. 01, 02 ...)").size(12.0));
+                        if ui.checkbox(&mut self.cfg.zero_pad, RichText::new("Zero-pad numbers  (e.g. 01, 02 ...)").size(12.0)).changed() {
+                            self.rebuild_sep_preview();
+                        }
                         ui.horizontal(|ui| {
                             ui.add_space(20.0);
                             ui.add_enabled(self.cfg.zero_pad, egui::Label::new(RichText::new("Width:").color(theme::TXT).size(12.0)));
-                            ui.add_enabled(self.cfg.zero_pad, egui::DragValue::new(&mut self.cfg.pad_width).range(1..=5));
+                            if ui.add_enabled(self.cfg.zero_pad, egui::DragValue::new(&mut self.cfg.pad_width).range(1..=5)).changed() {
+                                self.rebuild_sep_preview();
+                            }
                         });
                     });
                 });
