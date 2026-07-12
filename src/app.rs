@@ -1015,6 +1015,18 @@ impl ComicInfoApp {
         match dlg {
             Dialog::EditRule(mut s) => {
                 let mut saved = false; let mut cancelled = false;
+                // Range-validity check only -- not "must be numeric" in
+                // general, since some columns (Volume label, Summary
+                // text) are free text by design. Specifically the first
+                // two columns (Ch/Vol Start and End) must be present and
+                // parse as a number, because find_volume/find_date/
+                // find_summary fall back to f64::MAX/MIN for anything
+                // that doesn't parse -- an empty or non-numeric range
+                // silently produces a rule that can never match any
+                // chapter/volume, rather than an error at save time.
+                let range_valid = s.values.get(0).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
+                    && s.values.get(1).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok());
+
                 egui::Window::new(if s.is_new { "Add Rule" } else { "Edit Rule" })
                     .resizable(true).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1030,9 +1042,19 @@ impl ComicInfoApp {
                                 ui.end_row();
                             }
                         });
+                        if !range_valid {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(format!(
+                                "{} and {} are required and must be numbers.",
+                                s.labels.first().map(String::as_str).unwrap_or("Start"),
+                                s.labels.get(1).map(String::as_str).unwrap_or("End"),
+                            )).color(theme::TERR).size(11.0));
+                        }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            if ui.add(theme::btn_primary("  Save  ")).clicked() { saved = true; }
+                            if ui.add(theme::btn_primary("  Save  ")).clicked() && range_valid {
+                                saved = true;
+                            }
                             if ui.add(theme::btn_secondary("  Cancel  ")).clicked() { cancelled = true; }
                         });
                     });
@@ -1046,7 +1068,13 @@ impl ComicInfoApp {
                         (RuleTarget::Summary,     None)    => self.cfg.summ_rules.push(vals),
                         (RuleTarget::Summary,     Some(i)) => { if i < self.cfg.summ_rules.len() { self.cfg.summ_rules[i] = vals; } }
                     }
-                } else if !cancelled { self.dialog = Some(Dialog::EditRule(s)); }
+                } else if !cancelled {
+                    // Also covers Save being clicked while range_valid was
+                    // false -- the dialog simply stays open, same as
+                    // clicking neither button, so the person can fix the
+                    // fields and try again rather than losing their input.
+                    self.dialog = Some(Dialog::EditRule(s));
+                }
             }
 
             Dialog::Decimal(mut ds) => {
