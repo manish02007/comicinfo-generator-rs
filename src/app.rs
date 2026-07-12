@@ -2125,7 +2125,14 @@ impl ComicInfoApp {
             // Output Mode is genuinely about where files get written, so
             // it stays here alongside File Paths rather than moving to
             // Processing with Max Workers/Dry Run (see show_processing).
+            // Captured before entering the card: inside card().show()'s
+            // closure, available_width() reflects the frame's own
+            // content-driven size, not the panel's true width, so reading
+            // it there would just report back whatever the checkbox/radio
+            // content already shrank the frame to.
+            let full_w = ui.available_width();
             theme::card().show(ui, |ui| {
+                ui.set_min_width(full_w - 28.0); // - card's own left+right inner_margin (14px each)
                 theme::section_hdr(ui, "Output Mode");
                 ui.checkbox(&mut self.cfg.write_new_cbz,
                     RichText::new("Write new CBZ  -  don't overwrite the original file").size(12.0))
