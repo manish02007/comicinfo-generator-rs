@@ -123,6 +123,14 @@ pub struct ComicInfoApp {
     // preference for that dialog, not config data, so it lives here rather
     // than in AppConfig (doesn't get saved/loaded with a job config).
     pub reorder_show_active_only: bool,
+    // Tag Order dialog's button row height, measured via ui.scope() on the
+    // previous frame -- used to size the tag list's scroll area so the
+    // buttons always have guaranteed room below it, regardless of exact
+    // button/font metrics. A hand-estimated constant undercounted the
+    // real button height once already (assumed 24px; theme::btn_* is
+    // actually 28px), so this measures the real thing instead of trying
+    // to get every contributing pixel right by hand a second time.
+    pub reorder_button_row_h: f32,
     // Table selection
     pub vol_sel:  Option<usize>,
     pub date_sel: Option<usize>,
@@ -168,6 +176,7 @@ impl ComicInfoApp {
             settings:      AppSettings::default(),
             settings_open: false,
             reorder_show_active_only: false,
+            reorder_button_row_h: 44.0, // generous first-frame guess; corrected next frame
             vol_sel:     None, date_sel: None, summ_sel: None, meta_field_sel: None,
             dialog:      None,
             pick_kind:   None, pick_rx: None,
@@ -1888,15 +1897,13 @@ impl ComicInfoApp {
         let show_active_only = self.reorder_show_active_only;
         ui.add_space(6.0);
 
-        // Reserve room for the button row below (its own height plus the
-        // 8px gap before it) so the scroll area never greedily claims all
-        // available height and pushes the buttons off the bottom edge --
-        // which is exactly what an uncapped ScrollArea::vertical() did
-        // here once this became a full-size OS window instead of a small
-        // popup: with nothing capping it, "available height" was the
-        // whole window, leaving nothing for what comes after it.
-        const BUTTON_ROW_H: f32 = 24.0 + 8.0;
-        let list_h = (ui.available_height() - BUTTON_ROW_H).max(80.0);
+        // Reserve room below the list for: the button row's own real
+        // height (measured last frame via ui.scope(), not a hand-guessed
+        // constant -- an earlier 24px estimate undercounted the actual
+        // 28px button height and clipped them), the 8px gap before the
+        // row, and 6px of breathing room after it so the buttons aren't
+        // flush against the window's bottom edge.
+        let list_h = (ui.available_height() - self.reorder_button_row_h - 8.0 - 6.0).max(80.0);
 
         egui::ScrollArea::vertical().max_height(list_h).show(ui, |ui| {
             // Filtering by skipping items entirely (egui_dnd's own
@@ -1933,24 +1940,28 @@ impl ComicInfoApp {
         });
 
         ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.add(theme::btn_secondary("Reset to Default")).clicked() {
-                *reset = true;
-            }
-            ui.add_space(4.0);
-            if ui.add(theme::btn_secondary("Set as Default"))
-                .on_hover_text(
-                    "Save the current order as your standing preference -- \
-                     it will be used for new sessions and survive Reset All, \
-                     instead of reverting to the built-in schema order.")
-                .clicked()
-            {
-                *set_default = true;
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(theme::btn_primary("  Done  ")).clicked() { *open = false; }
+        let button_row = ui.scope(|ui| {
+            ui.horizontal(|ui| {
+                if ui.add(theme::btn_secondary("Reset to Default")).clicked() {
+                    *reset = true;
+                }
+                ui.add_space(4.0);
+                if ui.add(theme::btn_secondary("Set as Default"))
+                    .on_hover_text(
+                        "Save the current order as your standing preference -- \
+                         it will be used for new sessions and survive Reset All, \
+                         instead of reverting to the built-in schema order.")
+                    .clicked()
+                {
+                    *set_default = true;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.add(theme::btn_primary("  Done  ")).clicked() { *open = false; }
+                });
             });
         });
+        self.reorder_button_row_h = button_row.response.rect.height();
+        ui.add_space(6.0);
     }
 
     /// Reusable rule section: title + Add/Edit/Remove buttons + table.
