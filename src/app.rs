@@ -1065,6 +1065,23 @@ impl ComicInfoApp {
                         && s.values.get(1).map_or(false, |v| !v.trim().is_empty() && v.trim().parse::<f64>().is_ok())
                 };
 
+                // Overlap check against every OTHER rule in the same list
+                // (the row being edited is excluded by index, so re-saving
+                // it unchanged -- or just editing an unrelated field on it
+                // -- never flags itself). find_volume/find_date/
+                // find_summary all return the FIRST matching rule and
+                // never look further, so an overlapping/duplicate rule
+                // isn't a harmless duplicate -- it's a rule that can
+                // NEVER fire, silently, exactly like the empty-range bug
+                // fixed earlier. Only checked when range_valid, since
+                // there's nothing meaningful to compare yet otherwise.
+                let existing_rules: &[Vec<String>] = match s.target {
+                    RuleTarget::Volume  => &self.cfg.volume_rules,
+                    RuleTarget::Date    => &self.cfg.date_rules,
+                    RuleTarget::Summary => &self.cfg.summ_rules,
+                };
+                let overlap = range_valid && Self::rule_range_overlaps(&s.values, existing_rules, s.row_idx);
+
                 egui::Window::new(if s.is_new { "Add Rule" } else { "Edit Rule" })
                     .resizable(true).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1132,10 +1149,19 @@ impl ComicInfoApp {
                                 )
                             };
                             ui.label(RichText::new(msg).color(theme::TERR).size(11.0));
+                        } else if overlap {
+                            ui.add_space(4.0);
+                            let start_lbl = s.labels.first().map(String::as_str).unwrap_or("Start");
+                            let end_lbl = s.labels.get(1).map(String::as_str).unwrap_or("End");
+                            ui.label(RichText::new(format!(
+                                "This {start_lbl}/{end_lbl} range overlaps another rule -- \
+                                 whichever rule comes first will always be used, and this one \
+                                 will never take effect."
+                            )).color(theme::TERR).size(11.0));
                         }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            if ui.add(theme::btn_primary("  Save  ")).clicked() && range_valid {
+                            if ui.add(theme::btn_primary("  Save  ")).clicked() && range_valid && !overlap {
                                 saved = true;
                             }
                             if ui.add(theme::btn_secondary("  Cancel  ")).clicked() { cancelled = true; }
@@ -1153,9 +1179,10 @@ impl ComicInfoApp {
                     }
                 } else if !cancelled {
                     // Also covers Save being clicked while range_valid was
-                    // false -- the dialog simply stays open, same as
-                    // clicking neither button, so the person can fix the
-                    // fields and try again rather than losing their input.
+                    // false, or the range overlapped another rule -- the
+                    // dialog simply stays open, same as clicking neither
+                    // button, so the person can fix the fields and try
+                    // again rather than losing their input.
                     self.dialog = Some(Dialog::EditRule(s));
                 }
             }
@@ -2076,6 +2103,32 @@ impl ComicInfoApp {
     }
 
     /// Reusable rule section: title + Add/Edit/Remove buttons + table.
+    // Checks whether `values`' [Start, End] range (indices 0 and 1)
+    // overlaps any OTHER rule's range in `existing`. `skip_idx` excludes
+    // the row currently being edited (None when adding a fresh rule),
+    // so re-saving a rule unchanged -- or editing some other field on it
+    // -- never flags itself as overlapping its own prior range.
+    // Malformed existing rows (can't parse as numbers) are skipped
+    // rather than treated as a match, matching how find_volume/find_date/
+    // find_summary already tolerate bad data elsewhere.
+    fn rule_range_overlaps(values: &[String], existing: &[Vec<String>], skip_idx: Option<usize>) -> bool {
+        let (Some(new_lo), Some(new_hi)) = (
+            values.first().and_then(|v| v.trim().parse::<f64>().ok()),
+            values.get(1).and_then(|v| v.trim().parse::<f64>().ok()),
+        ) else { return false; };
+        // Normalize in case Start > End was typed -- the overlap check
+        // itself shouldn't depend on entry order.
+        let (new_lo, new_hi) = (new_lo.min(new_hi), new_lo.max(new_hi));
+
+        existing.iter().enumerate().any(|(i, row)| {
+            if Some(i) == skip_idx { return false; }
+            let Some(lo) = row.first().and_then(|v| v.trim().parse::<f64>().ok()) else { return false; };
+            let Some(hi) = row.get(1).and_then(|v| v.trim().parse::<f64>().ok()) else { return false; };
+            let (lo, hi) = (lo.min(hi), lo.max(hi));
+            new_lo <= hi && lo <= new_hi
+        })
+    }
+
     fn rule_section(
         ui:     &mut egui::Ui,
         title:  &str,
