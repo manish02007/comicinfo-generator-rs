@@ -911,6 +911,43 @@ impl ComicInfoApp {
         self.ui_tx     = Some(utx);
         self.running   = true;
         self.progress  = (0, cbz_files.len());
+
+        // Archive the previous run's content into self.log (a plain,
+        // ever-growing Vec, unlike file_slots) before resetting file_slots
+        // for this run. file_slots itself HAS to be reset to a fresh,
+        // exactly-this-run-sized array -- its whole design is index-
+        // stable slots so parallel workers can write results back in
+        // numeric order regardless of which thread finishes first, which
+        // only works when its length matches this run's file count. That
+        // reset was silently discarding the previous run's per-file log
+        // entries and its [DONE] footer -- this preserves them as
+        // permanent scrollback instead, in the same header -> per-file ->
+        // footer order they were displayed in, with a separator so the
+        // old run reads as clearly finished rather than blending into it.
+        if !self.file_slots.is_empty() || !self.log_footer.is_empty() {
+            for slot in self.file_slots.drain(..) {
+                if let Some(entries) = slot {
+                    self.log.extend(entries);
+                }
+            }
+            if self.log_footer.is_empty() {
+                // The previous run was stopped/interrupted before
+                // WorkerMsg::Done ever fired (log_footer is only ever
+                // populated there), so there's no [DONE] block -- and
+                // therefore no trailing separator -- to carry over.
+                // Without this, an interrupted run's archived content
+                // would run directly into the next run's with no visual
+                // break at all.
+                self.log.push(LogEntry { text: "-".repeat(60), level: LogLevel::Sep });
+            } else {
+                // log_footer's own [DONE] block already ends with a
+                // LogLevel::Sep separator line (see the WorkerMsg::Done
+                // handler above), so appending it here already leaves the
+                // previous run's content ending on a clean divider -- no
+                // extra separator needed on top of that.
+                self.log.append(&mut self.log_footer);
+            }
+        }
         self.file_slots = vec![None; cbz_files.len()];
         self.log_footer.clear();
 
