@@ -262,6 +262,17 @@ impl ComicInfoApp {
                 self.rebuild_sep_preview();
                 let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
                 self.status = format!("Loaded: {fname}");
+                // Every successful load gets a confirmation popup, not
+                // just version mismatches -- previously a normal,
+                // matching-version load only updated the small dim
+                // status-bar text, which is easy to miss entirely,
+                // especially for something as consequential as replacing
+                // the whole current session (which Load's own tooltip
+                // now explicitly warns about). The version-mismatch cases
+                // still get their specific warning, appended to this same
+                // confirmation instead of being the only time a dialog
+                // appears at all.
+                let mut msg = format!("Loaded '{fname}'.\n\nThe entire session was replaced with this file's settings.");
                 // A version mismatch means this config predates (or postdates)
                 // a structural change to AppConfig -- serde's #[serde(default)]
                 // already prevented a hard load failure, but fields that were
@@ -269,22 +280,33 @@ impl ComicInfoApp {
                 // Surface that explicitly rather than letting it look like
                 // silently "lost" data with no explanation.
                 if loaded_version < CURRENT_CONFIG_VERSION {
-                    self.dialog = Some(Dialog::Notice(format!(
-                        "'{fname}' was saved with an older version of this app \
-                         (config v{loaded_version} vs current v{CURRENT_CONFIG_VERSION}).\n\n\
+                    msg.push_str(&format!(
+                        "\n\nThis was saved with an older version of this app \
+                         (config v{loaded_version} vs current v{CURRENT_CONFIG_VERSION}). \
                          Some fields may not have carried over if the config \
-                         format changed since then. Worth double-checking the \
+                         format changed since then -- worth double-checking the \
                          Metadata tab before running."
-                    )));
+                    ));
                 } else if loaded_version > CURRENT_CONFIG_VERSION {
-                    self.dialog = Some(Dialog::Notice(format!(
-                        "'{fname}' was saved with a NEWER version of this app \
-                         (config v{loaded_version} vs current v{CURRENT_CONFIG_VERSION}).\n\n\
-                         Some fields may not load correctly. Consider updating \
+                    msg.push_str(&format!(
+                        "\n\nThis was saved with a NEWER version of this app \
+                         (config v{loaded_version} vs current v{CURRENT_CONFIG_VERSION}). \
+                         Some fields may not load correctly -- consider updating \
                          the app if you run into issues."
-                    )));
+                    ));
                 }
+                self.dialog = Some(Dialog::Notice(msg));
+            } else {
+                let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                self.dialog = Some(Dialog::Notice(format!(
+                    "Could not load '{fname}': the file isn't a valid config \
+                     (it may be a different kind of JSON file, or corrupted)."
+                )));
             }
+        } else {
+            self.dialog = Some(Dialog::Notice(format!(
+                "Could not read file:\n{}", path.display()
+            )));
         }
     }
     fn import_meta(&mut self, path: &Path) {
