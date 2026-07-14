@@ -402,17 +402,47 @@ impl ComicInfoApp {
             if map.contains_key("folder") || map.contains_key("prefix_mode") {
                 match serde_json::from_str::<AppConfig>(&data) {
                     Ok(cfg) => {
-                        self.cfg = cfg;
-                        self.rebuild_sep_preview();
-                        for (label, count) in [
-                            ("Volume Rules",  self.cfg.volume_rules.len()),
-                            ("Date Rules",    self.cfg.date_rules.len()),
-                            ("Summary Rules", self.cfg.summ_rules.len()),
-                        ] {
-                            if count > 0 {
-                                imported.push((label.to_string(), format!("{count} rule(s)")));
-                            }
+                        // Merge, not replace: this used to be `self.cfg =
+                        // cfg`, which silently did a full session
+                        // wipe-and-replace -- identical to what the Load
+                        // button does, but with none of Load's version-
+                        // mismatch warning, and while the person clicking
+                        // "Import" reasonably expects an ADDITIVE merge
+                        // into their current session (that's the entire
+                        // reason Import exists as a separate button from
+                        // Load). Only the structural, non-metadata-field
+                        // parts are pulled in here -- rules, paths, and
+                        // prefix/separator/mode settings, each only if the
+                        // incoming file actually has something in it.
+                        // Metadata FIELDS are deliberately left to the
+                        // flat-field scan below (which already runs
+                        // unconditionally after this block) rather than
+                        // merged here too, to avoid applying them twice.
+                        if !cfg.volume_rules.is_empty() {
+                            imported.push(("Volume Rules".to_string(), format!("{} rule(s)", cfg.volume_rules.len())));
+                            self.cfg.volume_rules = cfg.volume_rules;
                         }
+                        if !cfg.date_rules.is_empty() {
+                            imported.push(("Date Rules".to_string(), format!("{} rule(s)", cfg.date_rules.len())));
+                            self.cfg.date_rules = cfg.date_rules;
+                        }
+                        if !cfg.summ_rules.is_empty() {
+                            imported.push(("Summary Rules".to_string(), format!("{} rule(s)", cfg.summ_rules.len())));
+                            self.cfg.summ_rules = cfg.summ_rules;
+                        }
+                        if !cfg.folder.trim().is_empty() {
+                            imported.push(("CBZ Folder".to_string(), cfg.folder.clone()));
+                            self.cfg.folder = cfg.folder;
+                        }
+                        if !cfg.titles_json.trim().is_empty() {
+                            imported.push(("Titles JSON".to_string(), cfg.titles_json.clone()));
+                            self.cfg.titles_json = cfg.titles_json;
+                        }
+                        if !cfg.date_json.trim().is_empty() {
+                            imported.push(("Episode Dates JSON".to_string(), cfg.date_json.clone()));
+                            self.cfg.date_json = cfg.date_json;
+                        }
+                        self.rebuild_sep_preview();
                         // Custom (non-standard) fields the old tool had no
                         // named slot for. Accepts ["Tag","Value"] pairs or
                         // {"tag":...,"value":...} objects; anything else is
@@ -1748,11 +1778,11 @@ impl ComicInfoApp {
                     self.dialog = Some(Dialog::ConfirmReset);
                 }
                 ui.add_space(6.0);
-                if ui.add(theme::btn_secondary("Import")).on_hover_text("Import metadata from .py or .json (Ctrl+I)").clicked() {
+                if ui.add(theme::btn_secondary("Import")).on_hover_text("Merge metadata/rules from a .py or .json into the CURRENT session -- never replaces anything not in the file. (Ctrl+I)").clicked() {
                     self.start_pick(PathPick::ImportMeta);
                 }
                 ui.add_space(4.0);
-                if ui.add(theme::btn_secondary("Load")).on_hover_text("Load a config file (Ctrl+O)").clicked() {
+                if ui.add(theme::btn_secondary("Load")).on_hover_text("Load a saved config file, REPLACING the entire current session. (Ctrl+O)").clicked() {
                     self.start_pick(PathPick::LoadConfig);
                 }
                 ui.add_space(4.0);
