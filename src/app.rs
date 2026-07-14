@@ -887,6 +887,49 @@ impl ComicInfoApp {
         }
     }
 
+    // Archives the previous run's file_slots content and log_footer into
+    // self.log (a plain, ever-growing Vec, unlike file_slots) before
+    // anything for the NEW run is added to any of these three. Must be
+    // called before the first thing a new run pushes to self.log (e.g.
+    // "[Fresh start]" in the ResumeSession dialog, or check_finale's own
+    // notices) -- calling it from inside start_worker was too late, since
+    // that runs a full frame after "[Fresh start]" is pushed for the
+    // Start Fresh path, which put the archived previous-run content AFTER
+    // the new run's own "[Fresh start]" marker instead of before it.
+    //
+    // file_slots/log_footer themselves are NOT reset here -- that still
+    // happens in start_worker, immediately before the worker thread
+    // actually spawns, sized to that specific run's file count (their
+    // whole design: index-stable slots for parallel workers to write
+    // results back into in the right numeric order, which only works
+    // when sized to exactly the run in question).
+    fn archive_previous_run_log(&mut self) {
+        if !self.file_slots.is_empty() || !self.log_footer.is_empty() {
+            for slot in self.file_slots.drain(..) {
+                if let Some(entries) = slot {
+                    self.log.extend(entries);
+                }
+            }
+            if self.log_footer.is_empty() {
+                // The previous run was stopped/interrupted before
+                // WorkerMsg::Done ever fired (log_footer is only ever
+                // populated there), so there's no [DONE] block -- and
+                // therefore no trailing separator -- to carry over.
+                // Without this, an interrupted run's archived content
+                // would run directly into the next run's with no visual
+                // break at all.
+                self.log.push(LogEntry { text: "-".repeat(60), level: LogLevel::Sep });
+            } else {
+                // log_footer's own [DONE] block already ends with a
+                // LogLevel::Sep separator line (see the WorkerMsg::Done
+                // handler), so appending it here already leaves the
+                // previous run's content ending on a clean divider -- no
+                // extra separator needed on top of that.
+                self.log.append(&mut self.log_footer);
+            }
+        }
+    }
+
     // ── Kick off run ──────────────────────────────────────────────────────────
     fn start_worker(
         &mut self, cbz_files: Vec<PathBuf>, processed: HashSet<String>,
@@ -911,43 +954,6 @@ impl ComicInfoApp {
         self.ui_tx     = Some(utx);
         self.running   = true;
         self.progress  = (0, cbz_files.len());
-
-        // Archive the previous run's content into self.log (a plain,
-        // ever-growing Vec, unlike file_slots) before resetting file_slots
-        // for this run. file_slots itself HAS to be reset to a fresh,
-        // exactly-this-run-sized array -- its whole design is index-
-        // stable slots so parallel workers can write results back in
-        // numeric order regardless of which thread finishes first, which
-        // only works when its length matches this run's file count. That
-        // reset was silently discarding the previous run's per-file log
-        // entries and its [DONE] footer -- this preserves them as
-        // permanent scrollback instead, in the same header -> per-file ->
-        // footer order they were displayed in, with a separator so the
-        // old run reads as clearly finished rather than blending into it.
-        if !self.file_slots.is_empty() || !self.log_footer.is_empty() {
-            for slot in self.file_slots.drain(..) {
-                if let Some(entries) = slot {
-                    self.log.extend(entries);
-                }
-            }
-            if self.log_footer.is_empty() {
-                // The previous run was stopped/interrupted before
-                // WorkerMsg::Done ever fired (log_footer is only ever
-                // populated there), so there's no [DONE] block -- and
-                // therefore no trailing separator -- to carry over.
-                // Without this, an interrupted run's archived content
-                // would run directly into the next run's with no visual
-                // break at all.
-                self.log.push(LogEntry { text: "-".repeat(60), level: LogLevel::Sep });
-            } else {
-                // log_footer's own [DONE] block already ends with a
-                // LogLevel::Sep separator line (see the WorkerMsg::Done
-                // handler above), so appending it here already leaves the
-                // previous run's content ending on a clean divider -- no
-                // extra separator needed on top of that.
-                self.log.append(&mut self.log_footer);
-            }
-        }
         self.file_slots = vec![None; cbz_files.len()];
         self.log_footer.clear();
 
@@ -1034,6 +1040,7 @@ impl ComicInfoApp {
     /// Split out from on_start so the EmptyFieldsWarning dialog's "Continue
     /// Anyway" button can resume this same flow after the user confirms.
     fn continue_start(&mut self, cbzs: Vec<PathBuf>) {
+        self.archive_previous_run_log();
         let folder = self.cfg.folder.trim().to_string();
         // Check for resume
         let fname = Path::new(&folder).canonicalize().unwrap_or_default()
@@ -1119,6 +1126,23 @@ impl ComicInfoApp {
                 };
                 let overlap = range_valid && Self::rule_range_overlaps(&s.values, existing_rules, s.row_idx);
 
+                // Volume Rules specifically: two DIFFERENT, non-
+                // overlapping chapter ranges both producing the same
+                // output Volume number (e.g. "1-4 -> Vol 1" and
+                // "5-8 -> Vol 1") don't create a silently-dead rule the
+                // way an overlapping range does -- find_volume still
+                // returns the right value for whichever chapters are
+                // actually being looked up. But it's still nonsensical: a
+                // volume number should represent one specific, contiguous
+                // stretch of chapters, not two disconnected ones. Only
+                // meaningful for Volume Rules -- Date/Summary Rules
+                // repeating a Year or Summary across different volume
+                // ranges is completely normal (e.g. two volumes released
+                // in the same year) and shouldn't be flagged.
+                let duplicate_volume = range_valid && !overlap
+                    && matches!(s.target, RuleTarget::Volume)
+                    && Self::volume_value_duplicated(&s.values, existing_rules, s.row_idx);
+
                 egui::Window::new(if s.is_new { "Add Rule" } else { "Edit Rule" })
                     .resizable(true).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
@@ -1195,10 +1219,16 @@ impl ComicInfoApp {
                                  whichever rule comes first will always be used, and this one \
                                  will never take effect."
                             )).color(theme::TERR).size(11.0));
+                        } else if duplicate_volume {
+                            ui.add_space(4.0);
+                            ui.label(RichText::new(
+                                "This Volume number is already used by a different chapter range. \
+                                 Each volume number should map to one chapter range."
+                            ).color(theme::TERR).size(11.0));
                         }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            if ui.add(theme::btn_primary("  Save  ")).clicked() && range_valid && !overlap {
+                            if ui.add(theme::btn_primary("  Save  ")).clicked() && range_valid && !overlap && !duplicate_volume {
                                 saved = true;
                             }
                             if ui.add(theme::btn_secondary("  Cancel  ")).clicked() { cancelled = true; }
@@ -2148,6 +2178,24 @@ impl ComicInfoApp {
     // Malformed existing rows (can't parse as numbers) are skipped
     // rather than treated as a match, matching how find_volume/find_date/
     // find_summary already tolerate bad data elsewhere.
+    // Checks whether `values`' output Volume number (index 2) is already
+    // produced by a DIFFERENT rule in `existing` -- specific to Volume
+    // Rules, where the range represents chapters and column 2 is the
+    // resulting volume number. `skip_idx` excludes the row being edited,
+    // same as rule_range_overlaps. Compared as trimmed strings, not
+    // parsed as numbers: "1" and "01" are treated as different values
+    // deliberately, since zero-padding is a display choice elsewhere in
+    // this app (Zero-Padding setting), not something this equality check
+    // should second-guess or normalize.
+    fn volume_value_duplicated(values: &[String], existing: &[Vec<String>], skip_idx: Option<usize>) -> bool {
+        let Some(new_vol) = values.get(2).map(|v| v.trim()) else { return false; };
+        if new_vol.is_empty() { return false; }
+        existing.iter().enumerate().any(|(i, row)| {
+            if Some(i) == skip_idx { return false; }
+            row.get(2).map(|v| v.trim()) == Some(new_vol)
+        })
+    }
+
     fn rule_range_overlaps(values: &[String], existing: &[Vec<String>], skip_idx: Option<usize>) -> bool {
         let (Some(new_lo), Some(new_hi)) = (
             values.first().and_then(|v| v.trim().parse::<f64>().ok()),
