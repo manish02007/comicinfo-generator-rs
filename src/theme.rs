@@ -103,6 +103,35 @@ pub fn section_hdr(ui: &mut egui::Ui, title: &str) {
     ui.add_space(8.0);
 }
 
+// Same visual style as section_hdr, plus a right-aligned "?" button.
+// Sets *help_clicked to true on click, matching how ui.checkbox and
+// similar egui widgets take a &mut bool to report state back to the
+// caller rather than returning a Response the caller has to unpack.
+pub fn section_hdr_with_help(ui: &mut egui::Ui, title: &str, help_clicked: &mut bool) {
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        let (bar, _) = ui.allocate_exact_size(
+            egui::vec2(3.0, 16.0), egui::Sense::hover()
+        );
+        ui.painter().rect_filled(bar, Rounding::same(1.5), ACC);
+        ui.add_space(7.0);
+        ui.label(eframe::egui::RichText::new(title)
+            .size(12.5).color(TXT).strong());
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if ui.add(
+                egui::Button::new(eframe::egui::RichText::new("?").size(11.0).color(TDIM).strong())
+                    .fill(Color32::TRANSPARENT)
+                    .stroke(Stroke::new(1.0, BDR))
+                    .rounding(Rounding::same(9.0))
+                    .min_size(egui::vec2(18.0, 18.0))
+            ).on_hover_text("What does this do?").clicked() {
+                *help_clicked = true;
+            }
+        });
+    });
+    ui.add_space(8.0);
+}
+
 // ── Global style setup ────────────────────────────────────────────────────────
 pub fn setup_style(ctx: &egui::Context) {
     let mut vis = egui::Visuals::dark();

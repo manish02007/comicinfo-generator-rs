@@ -108,6 +108,8 @@ pub enum Dialog {
     ReorderTags,
     /// Shows the list of fields imported from a .py or .json metadata file
     ImportResult { filename: String, items: Vec<(String, String)> },
+    /// Detailed explanation for a tab or card's "?" help button.
+    HelpText { title: String, body: String },
 }
 
 #[derive(Debug, Clone)]
@@ -1406,6 +1408,20 @@ impl ComicInfoApp {
                 if !ok_clicked { self.dialog = Some(Dialog::Notice(msg)); }
             }
 
+            Dialog::HelpText { title, body } => {
+                let mut ok_clicked = false;
+                egui::Window::new(format!("? {title}")).resizable(true).collapsible(false)
+                    .default_width(440.0)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                        egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                            ui.label(RichText::new(&body).size(12.5));
+                        });
+                        ui.add_space(8.0);
+                        if ui.add(theme::btn_secondary("  Close  ")).clicked() { ok_clicked = true; }
+                    });
+                if !ok_clicked { self.dialog = Some(Dialog::HelpText { title, body }); }
+            }
+
             Dialog::ConfirmReset => {
                 let mut yes = false; let mut cancel = false;
                 egui::Window::new("Confirm Reset").resizable(false).collapsible(false)
@@ -1960,6 +1976,19 @@ impl ComicInfoApp {
         }).inner
     }
 
+    // Small circular "?" button placed next to a card's title, used
+    // consistently across every tab. Returns true on click; callers open
+    // Dialog::HelpText with their own title/body text.
+    fn help_btn(ui: &mut egui::Ui) -> bool {
+        ui.add(
+            egui::Button::new(RichText::new("?").size(11.0).color(theme::TDIM).strong())
+                .fill(Color32::TRANSPARENT)
+                .stroke(egui::Stroke::new(1.0, theme::BDR))
+                .rounding(egui::Rounding::same(9.0))
+                .min_size(egui::vec2(18.0, 18.0))
+        ).on_hover_text("What does this do?").clicked()
+    }
+
     fn path_row(ui: &mut egui::Ui, label: &str, val: &mut String, tip: &str) -> bool {
         let mut clicked = false;
         ui.add_space(2.0);
@@ -2316,6 +2345,23 @@ impl ComicInfoApp {
                         same_start_end: false, // fresh rule always starts with 2 separate fields
                     }));
                 }
+                ui.add_space(2.0);
+                if Self::help_btn(ui) {
+                    let body = match target {
+                        RuleTarget::Volume => "Maps a range of CHAPTER numbers to a single Volume number -- e.g. chapters 1 through 10 all belong to Volume 1.\n\n\
+                            Ch Start / Ch End: the inclusive chapter range this rule covers (works with decimal chapters too, e.g. 5.5).\n\n\
+                            Volume: the volume number written into ComicInfo.xml for every chapter in that range, when \"Include volume number in metadata\" is on (Processing tab).\n\n\
+                            Rules are checked in order, and the FIRST matching range wins -- so overlapping ranges, or two different ranges both producing the same Volume number, are blocked at Save time, since either one means a rule can silently never take effect or a volume number stops representing one specific stretch of chapters.".to_string(),
+                        RuleTarget::Date => "Maps a range of VOLUME numbers to a publication date -- e.g. volumes 1 through 1 (a single volume) were published on a specific Year/Month/Day.\n\n\
+                            Vol Start / Vol End: the inclusive volume range this rule covers. Tick \"Vol Start and Vol End are the same\" in Add/Edit Rule to enter just one volume number instead of a range.\n\n\
+                            Year / Month / Day: the publication date written into ComicInfo.xml for every chapter belonging to a volume in that range, when \"Use volume date rules for publication\" is on (Processing tab).\n\n\
+                            This is the VOLUME-based counterpart to Episode Dates JSON (Paths tab), which maps individual chapter numbers to dates instead -- use whichever matches how your source actually publishes.".to_string(),
+                        RuleTarget::Summary => "Maps a range of VOLUME numbers to a custom Summary -- e.g. volume 1 gets its own specific summary text, separate from every other volume.\n\n\
+                            Vol Start / Vol End: the inclusive volume range this rule covers. Tick \"Vol Start and Vol End are the same\" in Add/Edit Rule to enter just one volume number instead of a range.\n\n\
+                            Summary: the text written into ComicInfo.xml's Summary field for every chapter belonging to a volume in that range, when \"Use per-volume summary rules\" is on (Processing tab). Takes priority over the Default Summary (Metadata tab) for volumes it covers.".to_string(),
+                    };
+                    pending = Some(Dialog::HelpText { title: title.to_string(), body });
+                }
             });
         });
         // Summary Rules' Summary column is wide enough to regularly get
@@ -2373,13 +2419,21 @@ fn padded(row: &[String], n: usize) -> Vec<String> {
 // ═══════════════════════════════════════════════════════════════════════════════
 impl ComicInfoApp {
     fn show_paths(&mut self, ui: &mut egui::Ui) {
+        let mut help = None::<(&str, &str)>;
         egui::ScrollArea::vertical().id_salt("paths_scr").show(ui, |ui| {
             egui::Frame::none()
                 .inner_margin(egui::Margin::symmetric(20.0, 16.0))
                 .show(ui, |ui| {
 
             theme::card().show(ui, |ui| {
-                theme::section_hdr(ui, "File Paths");
+                let mut clicked = false;
+                theme::section_hdr_with_help(ui, "File Paths", &mut clicked);
+                if clicked {
+                    help = Some(("File Paths", "CBZ Folder is the only required field -- everything else is optional.\n\n\
+                        CBZ Folder: the folder containing the .cbz comic archive files you want to process. All .cbz files directly inside this folder are picked up when you click Start Processing (subfolders are not scanned).\n\n\
+                        Titles JSON: an optional file mapping chapter or volume numbers to titles, e.g. {\"1\": \"The Beginning\", \"2\": \"Rising Action\"}. If a number in this file matches a chapter/volume being processed, that title is used in both the renamed filename and the XML Title field. If left blank, or a specific number isn't in the file, the original filename is kept as-is (sanitized only) and used as the title. This same file is used whether you're numbering by chapter, episode, or volume.\n\n\
+                        Episode Dates JSON: an optional file mapping chapter/episode numbers directly to a publication date, e.g. {\"1\": \"Jul 25, 2019\"}. This is a per-chapter alternative to the Date Rules table on the Rules tab (which maps VOLUME ranges to dates) -- use whichever matches how your source actually publishes dates."));
+                }
                 if Self::path_row(ui, "CBZ Folder:", &mut self.cfg.folder, "Folder containing the .cbz files.") {
                     self.start_pick(PathPick::Folder);
                 }
@@ -2404,7 +2458,15 @@ impl ComicInfoApp {
             let full_w = ui.available_width();
             theme::card().show(ui, |ui| {
                 ui.set_min_width(full_w - 28.0); // - card's own left+right inner_margin (14px each)
-                theme::section_hdr(ui, "Output Mode");
+                let mut clicked = false;
+                theme::section_hdr_with_help(ui, "Output Mode", &mut clicked);
+                if clicked {
+                    help = Some(("Output Mode", "Controls whether the original .cbz files are modified, or left untouched with new files written instead.\n\n\
+                        Write new CBZ (unchecked by default): when OFF, the original .cbz is renamed and its ComicInfo.xml is updated in place -- the safest option to leave off if you want to keep working the same way this app has always worked.\n\n\
+                        When ON, a completely new .cbz file is written and the original is never modified, renamed, or deleted.\n\n\
+                        Subfolder next to source: the new files are written into an \"output\" folder created inside the same folder as your originals. This folder is created automatically if it doesn't exist. Writing new files directly into the source folder isn't offered as an option: if a new file's computed name ever happened to match an original's name, it would silently overwrite it -- exactly what this feature exists to prevent.\n\n\
+                        Custom folder: choose any folder you like for the new files, via Browse or by typing a path directly."));
+                }
                 ui.checkbox(&mut self.cfg.write_new_cbz,
                     RichText::new("Write new CBZ  -  don't overwrite the original file").size(12.0))
                     .on_hover_text("When off (default), the original .cbz is modified and renamed in place.\nWhen on, a new file is written and the original is left completely untouched.");
@@ -2458,9 +2520,13 @@ impl ComicInfoApp {
 
                 }); // Frame
         });
+        if let Some((title, body)) = help {
+            self.dialog = Some(Dialog::HelpText { title: title.to_string(), body: body.to_string() });
+        }
     }
 
     fn show_processing(&mut self, ui: &mut egui::Ui) {
+        let mut help = None::<(&str, &str)>;
         egui::ScrollArea::vertical().id_salt("proc_scr").show(ui, |ui| {
             ui.add_space(16.0);
             ui.columns(2, |cols| {
@@ -2471,7 +2537,17 @@ impl ComicInfoApp {
                     // Mode alone was a two-radio-button sliver next to much
                     // taller neighbors.
                     theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Mode & Volume Metadata");
+                        let mut clicked = false;
+                        theme::section_hdr_with_help(ui, "Mode & Volume Metadata", &mut clicked);
+                        if clicked {
+                            help = Some(("Mode & Volume Metadata", "Mode is a shortcut that sets the 3 checkboxes below it -- it has no other effect and isn't itself saved into the XML.\n\n\
+                                Manga: turns ON all 3 checkboxes below (the usual case for series organized into volumes).\n\n\
+                                Manhwa / Manhua: turns OFF all 3 checkboxes below (manhwa/manhua are typically published as standalone chapters with no volume structure).\n\n\
+                                You can still flip any of the 3 checkboxes individually afterward -- picking a Mode is just a fast starting point, not a locked setting.\n\n\
+                                Include volume number in metadata: writes a Volume field into ComicInfo.xml, using whatever the Volume Rules table (Rules tab) maps the current chapter to.\n\n\
+                                Use volume date rules for publication: overrides the Year/Month/Day fields with whatever the Date Rules table (Rules tab) maps the current volume to, instead of using Episode Dates JSON or leaving them blank.\n\n\
+                                Use per-volume summary rules: overrides the Summary field with whatever the Summary Rules table (Rules tab) maps the current volume to, instead of the Default Summary on the Metadata tab."));
+                        }
                         ui.horizontal(|ui| {
                             let was = self.cfg.mode.clone();
                             ui.radio_value(&mut self.cfg.mode, ComicMode::Manga, "Manga")
@@ -2497,7 +2573,14 @@ impl ComicInfoApp {
                     ui.add_space(10.0);
                     // Separator
                     theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Title Separator");
+                        let mut clicked = false;
+                        theme::section_hdr_with_help(ui, "Title Separator", &mut clicked);
+                        if clicked {
+                            help = Some(("Title Separator", "Controls the text placed between the number and the title in the renamed filename and the XML Title -- e.g. the \" - \" in \"Episode 40 - My Title\".\n\n\
+                                By default, this is \" - \" for Episode/Volume prefixes and \": \" for Chapter (matching how each is conventionally written). Override separator replaces this with whatever you type in the Separator box.\n\n\
+                                Avoid characters that aren't valid in filenames: / \\ : * ? \" < > |\n\n\
+                                The Preview box below always shows exactly what the final filename would look like with your current settings, updating live as you change Separator, Number Prefix, or Zero-Padding."));
+                        }
                         if ui.checkbox(&mut self.cfg.csep_on,
                             RichText::new("Override separator").size(12.0))
                             .on_hover_text("Replaces the default ' - ' or ': ' between number and title.")
@@ -2529,7 +2612,13 @@ impl ComicInfoApp {
                     // because that tab's layout needed a second card to
                     // fill out a column, not because they belonged there.
                     theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Processing Settings");
+                        let mut clicked = false;
+                        theme::section_hdr_with_help(ui, "Processing Settings", &mut clicked);
+                        if clicked {
+                            help = Some(("Processing Settings", "Max Workers: how many files are processed in parallel. Higher values finish a batch faster on multi-core machines, but with heavy disk or antivirus activity, a very high number can sometimes be slower than a moderate one -- 4 is a reasonable default, and there's rarely a benefit to going far beyond your CPU's core count.\n\n\
+                                Dry Run: runs through every step -- reading files, computing new names, resolving titles/dates/summaries from your rules -- and reports exactly what WOULD happen, without modifying, renaming, or writing anything. Use this to sanity-check your rules and settings before committing to a real run.\n\n\
+                                Log directory / Open Folder: every run appends to a log file in this folder, useful for reviewing exactly what happened after the fact, especially for a large batch."));
+                        }
                         ui.horizontal(|ui| {
                             ui.label(RichText::new("Max Workers:").color(theme::TDIM).size(12.0));
                             ui.add_space(4.0);
@@ -2565,7 +2654,17 @@ impl ComicInfoApp {
                     // alone was a one-dropdown sliver next to much taller
                     // neighbors.
                     theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Number Prefix");
+                        let mut clicked = false;
+                        theme::section_hdr_with_help(ui, "Number Prefix", &mut clicked);
+                        if clicked {
+                            help = Some(("Number Prefix", "Controls the word placed before the chapter/episode/volume number in the renamed filename and the XML Title -- the \"Episode\" in \"Episode 40\".\n\n\
+                                Auto-detect from filename: looks at each file's own original name and picks Episode, Chapter, or Volume based on which word (or an abbreviation like \"Ep.\"/\"Ch.\"/\"Vol.\") already appears in it.\n\n\
+                                Always: Episode / Chapter / Volume: forces every file to use that same word, regardless of what the original filename says.\n\n\
+                                Custom: uses whatever text you type into Custom text instead of Episode/Chapter/Volume -- useful for series with non-standard numbering (e.g. \"Break\", \"Part\", \"Side Story\").\n\n\
+                                Post-Finale Behaviour (below the divider): once a chapter is marked as the finale (via the Finale Chapter Detected prompt shown when starting a run), this controls how chapters AFTER it are numbered.\n\n\
+                                strip: removes the number prefix entirely from post-finale chapters, leaving just their title -- useful for side stories or bonus chapters that come after the main story ends.\n\n\
+                                keep: continues numbering post-finale chapters normally, as if nothing changed."));
+                        }
                         for (val, lbl) in [
                             (PrefixMode::Auto,    "Auto-detect from filename"),
                             (PrefixMode::Episode, "Always: Episode"),
@@ -2604,7 +2703,14 @@ impl ComicInfoApp {
                     ui.add_space(10.0);
                     // Zero-pad
                     theme::card().show(ui, |ui| {
-                        theme::section_hdr(ui, "Zero-Padding");
+                        let mut clicked = false;
+                        theme::section_hdr_with_help(ui, "Zero-Padding", &mut clicked);
+                        if clicked {
+                            help = Some(("Zero-Padding", "Pads chapter/episode/volume numbers with leading zeros -- e.g. \"1\" becomes \"01\" with a width of 2.\n\n\
+                                Width sets how many digits the number is padded to. A number that's already at or beyond that width is left unchanged (e.g. width 2 leaves \"123\" as \"123\", it never truncates).\n\n\
+                                Decimal chapter numbers (e.g. \"5.5\") are never padded, since padding a fraction doesn't have a sensible meaning -- they're written exactly as found.\n\n\
+                                This only affects the DISPLAYED number in the filename and Title -- it has no effect on which Rules-tab range a chapter falls into, since those are matched by the actual numeric value, not its padded text."));
+                        }
                         if ui.checkbox(&mut self.cfg.zero_pad, RichText::new("Zero-pad numbers  (e.g. 01, 02 ...)").size(12.0)).changed() {
                             self.rebuild_sep_preview();
                         }
@@ -2619,6 +2725,9 @@ impl ComicInfoApp {
                 });
             });
         });
+        if let Some((title, body)) = help {
+            self.dialog = Some(Dialog::HelpText { title: title.to_string(), body: body.to_string() });
+        }
     }
 
     fn show_metadata(&mut self, ui: &mut egui::Ui) {
@@ -2663,6 +2772,18 @@ impl ComicInfoApp {
                                 .min_size(egui::vec2(0.0, 24.0))
                         ).on_hover_text("See and drag to rearrange the order tags are written to ComicInfo.xml.").clicked() {
                             pending_dialog = Some(Dialog::ReorderTags);
+                        }
+                        ui.add_space(2.0);
+                        if Self::help_btn(ui) {
+                            pending_dialog = Some(Dialog::HelpText {
+                                title: "Constant Metadata".to_string(),
+                                body: "These fields are written into EVERY CBZ's ComicInfo.xml exactly as shown here -- Series, Writer, Genre, and so on don't usually change chapter to chapter, so they're set once here rather than per-file.\n\n\
+                                    Add Tag: adds another ComicInfo v2.1 field to this list (only fields not already added are offered).\n\n\
+                                    Remove: removes the currently-selected field below (click a field's name to select it first).\n\n\
+                                    Tag Order: opens a separate window where you can drag fields into whatever order you want them written to the XML -- purely cosmetic for most readers, but some tools care about tag order.\n\n\
+                                    Community Rating specifically has its own \"1-10 scale\" checkbox next to it when added -- tick it to enter a MyAnimeList/AniList-style score out of 10, which is automatically converted to the ComicInfo schema's real 0-5 scale on write.\n\n\
+                                    A field left blank here is simply omitted from the XML entirely, rather than being written as an empty tag.".to_string(),
+                            });
                         }
                     });
                 });
@@ -2816,16 +2937,25 @@ impl ComicInfoApp {
                     self.cfg.metadata_fields.retain(|(t, _)| t != &tag);
                 }
             }
-            if pending_dialog.is_some() { self.dialog = pending_dialog; }
-
             ui.add_space(10.0);
 
             theme::card().show(ui, |ui| {
-                theme::section_hdr(ui, "Default Summary  (Chapter 1 + fallback)");
+                let mut clicked = false;
+                theme::section_hdr_with_help(ui, "Default Summary  (Chapter 1 + fallback)", &mut clicked);
+                if clicked {
+                    pending_dialog = Some(Dialog::HelpText {
+                        title: "Default Summary".to_string(),
+                        body: "This text is used as the Summary field for Chapter 1, and as a fallback for any other chapter/volume that doesn't get a more specific summary from the Summary Rules table (Rules tab).\n\n\
+                            If \"Use per-volume summary rules\" is on (Processing tab) and a chapter's volume has a matching entry in Summary Rules, that takes priority over this text. Otherwise, every chapter uses this Default Summary as-is.\n\n\
+                            Leave this blank if you'd rather have no Summary at all for chapters not covered by a Summary Rule.".to_string(),
+                    });
+                }
                 ui.add(egui::TextEdit::multiline(&mut self.cfg.summary)
                     .desired_rows(6).desired_width(f32::INFINITY)
                     .font(egui::FontId::new(12.0, egui::FontFamily::Monospace)));
             });
+
+            if pending_dialog.is_some() { self.dialog = pending_dialog; }
 
                 }); // Frame
         });
@@ -3000,6 +3130,19 @@ impl ComicInfoApp {
                     ui.label(RichText::new("Log Output").color(theme::ACC2).strong().size(12.0));
                     ui.add_space(8.0);
                     ui.checkbox(&mut self.verbose, RichText::new("Verbose").color(theme::TDIM).size(11.0));
+                    ui.add_space(4.0);
+                    if Self::help_btn(ui) {
+                        self.dialog = Some(Dialog::HelpText {
+                            title: "Run".to_string(),
+                            body: "Start Processing: begins processing every .cbz file in the CBZ Folder (Paths tab), applying your Constant Metadata, Rules, and every other setting from the other tabs.\n\n\
+                                If a previous run on this same folder was interrupted, you'll be asked whether to resume from where it left off or start fresh.\n\n\
+                                Stop: cancels an in-progress run after the file currently being processed finishes -- already-completed files are not undone.\n\n\
+                                Dry Run (Processing tab): if enabled, this run only reports what WOULD happen without actually modifying, renaming, or writing any files.\n\n\
+                                Verbose: shows additional detail in the log below, such as per-file processing steps that are otherwise summarized.\n\n\
+                                Clear: erases everything currently shown in the log below. This cannot be undone, and you'll be asked to confirm first.\n\n\
+                                The log keeps every previous run's output as you start new ones, growing downward -- scroll up to see earlier runs.".to_string(),
+                        });
+                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(
                             egui::Button::new(RichText::new("Clear").size(11.0).color(theme::TDIM))
