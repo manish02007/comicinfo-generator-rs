@@ -1410,7 +1410,7 @@ impl ComicInfoApp {
 
             Dialog::HelpText { title, body } => {
                 let mut ok_clicked = false;
-                egui::Window::new(format!("? {title}")).resizable(true).collapsible(false)
+                egui::Window::new(&title).resizable(true).collapsible(false)
                     .default_width(440.0)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
                         egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
@@ -2307,6 +2307,31 @@ impl ComicInfoApp {
         ui.horizontal(|ui| {
             ui.label(RichText::new(title).color(theme::ACC2).strong().size(12.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // "?" added FIRST so it lands at the true right edge of
+                // the row -- in a right-to-left layout, the first widget
+                // added claims the rightmost position, and each
+                // subsequent widget packs further left. Adding it last
+                // (as a previous pass here mistakenly left it) puts it at
+                // the LEFT edge of this button group instead -- closer to
+                // the title than to the window's actual right edge,
+                // which is the bug being fixed here.
+                if Self::help_btn(ui) {
+                    let body = match target {
+                        RuleTarget::Volume => "Maps a range of CHAPTER numbers to a single Volume number -- e.g. chapters 1 through 10 all belong to Volume 1.\n\n\
+                            Ch Start / Ch End: the inclusive chapter range this rule covers (works with decimal chapters too, e.g. 5.5).\n\n\
+                            Volume: the volume number written into ComicInfo.xml for every chapter in that range, when \"Include volume number in metadata\" is on (Processing tab).\n\n\
+                            Rules are checked in order, and the FIRST matching range wins -- so overlapping ranges, or two different ranges both producing the same Volume number, are blocked at Save time, since either one means a rule can silently never take effect or a volume number stops representing one specific stretch of chapters.".to_string(),
+                        RuleTarget::Date => "Maps a range of VOLUME numbers to a publication date -- e.g. volumes 1 through 1 (a single volume) were published on a specific Year/Month/Day.\n\n\
+                            Vol Start / Vol End: the inclusive volume range this rule covers. Tick \"Vol Start and Vol End are the same\" in Add/Edit Rule to enter just one volume number instead of a range.\n\n\
+                            Year / Month / Day: the publication date written into ComicInfo.xml for every chapter belonging to a volume in that range, when \"Use volume date rules for publication\" is on (Processing tab).\n\n\
+                            This is the VOLUME-based counterpart to Episode Dates JSON (Paths tab), which maps individual chapter numbers to dates instead -- use whichever matches how your source actually publishes.".to_string(),
+                        RuleTarget::Summary => "Maps a range of VOLUME numbers to a custom Summary -- e.g. volume 1 gets its own specific summary text, separate from every other volume.\n\n\
+                            Vol Start / Vol End: the inclusive volume range this rule covers. Tick \"Vol Start and Vol End are the same\" in Add/Edit Rule to enter just one volume number instead of a range.\n\n\
+                            Summary: the text written into ComicInfo.xml's Summary field for every chapter belonging to a volume in that range, when \"Use per-volume summary rules\" is on (Processing tab). Takes priority over the Default Summary (Metadata tab) for volumes it covers.".to_string(),
+                    };
+                    pending = Some(Dialog::HelpText { title: title.to_string(), body });
+                }
+                ui.add_space(2.0);
                 if ui.add(egui::Button::new(RichText::new("Remove").size(11.0).color(theme::TERR)).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR)).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
                     if let Some(idx) = *sel {
                         if idx < rows.len() { rows.remove(idx); }
@@ -2344,23 +2369,6 @@ impl ComicInfoApp {
                         values: vec![String::new(); cols.len()],
                         same_start_end: false, // fresh rule always starts with 2 separate fields
                     }));
-                }
-                ui.add_space(2.0);
-                if Self::help_btn(ui) {
-                    let body = match target {
-                        RuleTarget::Volume => "Maps a range of CHAPTER numbers to a single Volume number -- e.g. chapters 1 through 10 all belong to Volume 1.\n\n\
-                            Ch Start / Ch End: the inclusive chapter range this rule covers (works with decimal chapters too, e.g. 5.5).\n\n\
-                            Volume: the volume number written into ComicInfo.xml for every chapter in that range, when \"Include volume number in metadata\" is on (Processing tab).\n\n\
-                            Rules are checked in order, and the FIRST matching range wins -- so overlapping ranges, or two different ranges both producing the same Volume number, are blocked at Save time, since either one means a rule can silently never take effect or a volume number stops representing one specific stretch of chapters.".to_string(),
-                        RuleTarget::Date => "Maps a range of VOLUME numbers to a publication date -- e.g. volumes 1 through 1 (a single volume) were published on a specific Year/Month/Day.\n\n\
-                            Vol Start / Vol End: the inclusive volume range this rule covers. Tick \"Vol Start and Vol End are the same\" in Add/Edit Rule to enter just one volume number instead of a range.\n\n\
-                            Year / Month / Day: the publication date written into ComicInfo.xml for every chapter belonging to a volume in that range, when \"Use volume date rules for publication\" is on (Processing tab).\n\n\
-                            This is the VOLUME-based counterpart to Episode Dates JSON (Paths tab), which maps individual chapter numbers to dates instead -- use whichever matches how your source actually publishes.".to_string(),
-                        RuleTarget::Summary => "Maps a range of VOLUME numbers to a custom Summary -- e.g. volume 1 gets its own specific summary text, separate from every other volume.\n\n\
-                            Vol Start / Vol End: the inclusive volume range this rule covers. Tick \"Vol Start and Vol End are the same\" in Add/Edit Rule to enter just one volume number instead of a range.\n\n\
-                            Summary: the text written into ComicInfo.xml's Summary field for every chapter belonging to a volume in that range, when \"Use per-volume summary rules\" is on (Processing tab). Takes priority over the Default Summary (Metadata tab) for volumes it covers.".to_string(),
-                    };
-                    pending = Some(Dialog::HelpText { title: title.to_string(), body });
                 }
             });
         });
@@ -2744,6 +2752,25 @@ impl ComicInfoApp {
                     ui.label(RichText::new("Constant Metadata  (applied to every CBZ)")
                         .color(theme::TXT).strong().size(12.5));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Added FIRST so it lands at the far right -- a
+                        // right-to-left layout packs widgets starting
+                        // from the right edge in the order they're
+                        // added, so adding "?" last (as this was left,
+                        // mistakenly, from an earlier pass) put it at the
+                        // LEFT edge of this button group instead of the
+                        // window's true right edge.
+                        if Self::help_btn(ui) {
+                            pending_dialog = Some(Dialog::HelpText {
+                                title: "Constant Metadata".to_string(),
+                                body: "These fields are written into EVERY CBZ's ComicInfo.xml exactly as shown here -- Series, Writer, Genre, and so on don't usually change chapter to chapter, so they're set once here rather than per-file.\n\n\
+                                    Add Tag: adds another ComicInfo v2.1 field to this list (only fields not already added are offered).\n\n\
+                                    Remove: removes the currently-selected field below (click a field's name to select it first).\n\n\
+                                    Tag Order: opens a separate window where you can drag fields into whatever order you want them written to the XML -- purely cosmetic for most readers, but some tools care about tag order.\n\n\
+                                    Community Rating specifically has its own \"1-10 scale\" checkbox next to it when added -- tick it to enter a MyAnimeList/AniList-style score out of 10, which is automatically converted to the ComicInfo schema's real 0-5 scale on write.\n\n\
+                                    A field left blank here is simply omitted from the XML entirely, rather than being written as an empty tag.".to_string(),
+                            });
+                        }
+                        ui.add_space(2.0);
                         if ui.add(
                             egui::Button::new(RichText::new("Remove").size(11.0).color(theme::TERR))
                                 .fill(Color32::TRANSPARENT)
@@ -2772,18 +2799,6 @@ impl ComicInfoApp {
                                 .min_size(egui::vec2(0.0, 24.0))
                         ).on_hover_text("See and drag to rearrange the order tags are written to ComicInfo.xml.").clicked() {
                             pending_dialog = Some(Dialog::ReorderTags);
-                        }
-                        ui.add_space(2.0);
-                        if Self::help_btn(ui) {
-                            pending_dialog = Some(Dialog::HelpText {
-                                title: "Constant Metadata".to_string(),
-                                body: "These fields are written into EVERY CBZ's ComicInfo.xml exactly as shown here -- Series, Writer, Genre, and so on don't usually change chapter to chapter, so they're set once here rather than per-file.\n\n\
-                                    Add Tag: adds another ComicInfo v2.1 field to this list (only fields not already added are offered).\n\n\
-                                    Remove: removes the currently-selected field below (click a field's name to select it first).\n\n\
-                                    Tag Order: opens a separate window where you can drag fields into whatever order you want them written to the XML -- purely cosmetic for most readers, but some tools care about tag order.\n\n\
-                                    Community Rating specifically has its own \"1-10 scale\" checkbox next to it when added -- tick it to enter a MyAnimeList/AniList-style score out of 10, which is automatically converted to the ComicInfo schema's real 0-5 scale on write.\n\n\
-                                    A field left blank here is simply omitted from the XML entirely, rather than being written as an empty tag.".to_string(),
-                            });
                         }
                     });
                 });
@@ -3084,19 +3099,43 @@ impl ComicInfoApp {
                             .color(theme::TWARN).size(12.0).strong());
                     }
 
-                    // Progress fraction right-aligned
+                    // Right-aligned group: "?" and, once a run has
+                    // started, the progress fraction. Both live in ONE
+                    // right-to-left sub-layout added LAST in this row --
+                    // verified directly (a standalone layout test) that
+                    // adding a right-to-left sub-layout FIRST in a
+                    // left-to-right horizontal does NOT claim the row's
+                    // true right edge; it instead pushes everything added
+                    // afterward (Start Processing included) to the
+                    // right, which is the opposite of what's wanted here.
+                    // Added last, "?" first within it, correctly lands at
+                    // the far right with the progress numbers sitting
+                    // cleanly to its left, no overlap, Start Processing
+                    // unaffected at the left edge.
                     let (done, total) = self.progress;
-                    if total > 0 {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.add_space(4.0);
-                            let pct = done as f32 / total as f32;
-                            ui.label(RichText::new(format!("{done} / {total}"))
-                                .color(theme::TDIM).size(11.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if Self::help_btn(ui) {
+                            self.dialog = Some(Dialog::HelpText {
+                                title: "Run".to_string(),
+                                body: "Start Processing: begins processing every .cbz file in the CBZ Folder (Paths tab), applying your Constant Metadata, Rules, and every other setting from the other tabs.\n\n\
+                                    If a previous run on this same folder was interrupted, you'll be asked whether to resume from where it left off or start fresh.\n\n\
+                                    Stop: cancels an in-progress run after the file currently being processed finishes -- already-completed files are not undone.\n\n\
+                                    Dry Run (Processing tab): if enabled, this run only reports what WOULD happen without actually modifying, renaming, or writing any files.\n\n\
+                                    Verbose (Log Output, below): shows additional detail in the log, such as per-file processing steps that are otherwise summarized.\n\n\
+                                    Clear (Log Output, below): erases everything currently shown in the log. This cannot be undone, and you'll be asked to confirm first.\n\n\
+                                    The log keeps every previous run's output as you start new ones, growing downward -- scroll up to see earlier runs.".to_string(),
+                            });
+                        }
+                        if total > 0 {
                             ui.add_space(8.0);
+                            let pct = done as f32 / total as f32;
                             ui.label(RichText::new(format!("{}%", (pct * 100.0) as u32))
                                 .color(theme::ACC2).strong().size(14.0));
-                        });
-                    }
+                            ui.add_space(8.0);
+                            ui.label(RichText::new(format!("{done} / {total}"))
+                                .color(theme::TDIM).size(11.0));
+                        }
+                    });
                 });
             });
 
@@ -3130,19 +3169,6 @@ impl ComicInfoApp {
                     ui.label(RichText::new("Log Output").color(theme::ACC2).strong().size(12.0));
                     ui.add_space(8.0);
                     ui.checkbox(&mut self.verbose, RichText::new("Verbose").color(theme::TDIM).size(11.0));
-                    ui.add_space(4.0);
-                    if Self::help_btn(ui) {
-                        self.dialog = Some(Dialog::HelpText {
-                            title: "Run".to_string(),
-                            body: "Start Processing: begins processing every .cbz file in the CBZ Folder (Paths tab), applying your Constant Metadata, Rules, and every other setting from the other tabs.\n\n\
-                                If a previous run on this same folder was interrupted, you'll be asked whether to resume from where it left off or start fresh.\n\n\
-                                Stop: cancels an in-progress run after the file currently being processed finishes -- already-completed files are not undone.\n\n\
-                                Dry Run (Processing tab): if enabled, this run only reports what WOULD happen without actually modifying, renaming, or writing any files.\n\n\
-                                Verbose: shows additional detail in the log below, such as per-file processing steps that are otherwise summarized.\n\n\
-                                Clear: erases everything currently shown in the log below. This cannot be undone, and you'll be asked to confirm first.\n\n\
-                                The log keeps every previous run's output as you start new ones, growing downward -- scroll up to see earlier runs.".to_string(),
-                        });
-                    }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(
                             egui::Button::new(RichText::new("Clear").size(11.0).color(theme::TDIM))
