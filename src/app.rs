@@ -1912,6 +1912,27 @@ impl ComicInfoApp {
                 {
                     self.save_settings();
                 }
+
+                // About is static info, not a preference, so it's set off
+                // with a real divider (rather than the section_hdr accent
+                // bar the toggle groups above use) to read as a distinct
+                // kind of content rather than a third settable option.
+                ui.add_space(14.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                ui.vertical_centered(|ui| {
+                    ui.label(RichText::new("ComicInfo Generator")
+                        .size(13.0).color(theme::TXT).strong());
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
+                        .size(11.0).color(theme::TDIM));
+                    ui.add_space(6.0);
+                    ui.hyperlink_to(
+                        RichText::new("GitHub").size(11.5).color(theme::ACC2),
+                        env!("CARGO_PKG_REPOSITORY"),
+                    );
+                });
             });
         self.settings_open = open;
     }
