@@ -9,6 +9,23 @@ mod worker;
 
 use eframe::egui;
 
+// App icon, embedded directly in the binary so no external file needs to
+// ship alongside the executable (matters most for the plain .tar.gz /
+// manual-install case, which has no installer to place a separate asset).
+// 256x256 balances a crisp taskbar/alt-tab icon against binary size --
+// egui/the OS compositor downscales it for smaller contexts (dock, tray).
+const ICON_PNG: &[u8] = include_bytes!("../assets/icon_256.png");
+
+/// Decodes the embedded PNG into the raw RGBA egui/eframe needs for a
+/// window icon. Falls back to no icon (rather than panicking) if the
+/// embedded bytes are ever somehow corrupt -- a missing icon is a cosmetic
+/// issue, not worth crashing the whole app over.
+fn load_icon() -> Option<egui::IconData> {
+    let image = image::load_from_memory(ICON_PNG).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Some(egui::IconData { rgba: image.into_raw(), width, height })
+}
+
 /// Writes panic details (message + source location + timestamp) to
 /// logs/crash.log before falling through to the default handler, so a
 /// crash leaves a paper trail on disk instead of vanishing the moment the
@@ -47,11 +64,23 @@ fn install_panic_hook() {
 fn main() -> eframe::Result<()> {
     install_panic_hook();
 
+    // app_id matches the .desktop file's filename (and its Name= /
+    // StartupWMClass, in turn matching this binary's name) -- Wayland's
+    // compositor uses this to associate the running window with its
+    // .desktop entry for the taskbar/dock/launcher. X11's equivalent,
+    // WM_CLASS, already defaults to the binary name with no extra
+    // wiring needed, but Wayland's app_id has no such automatic fallback.
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("ComicInfo Generator")
+        .with_app_id("comicinfo-generator")
+        .with_inner_size([1060.0, 760.0])
+        .with_min_inner_size([860.0, 620.0]);
+    if let Some(icon) = load_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
     let native_options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("ComicInfo Generator")
-            .with_inner_size([1060.0, 760.0])
-            .with_min_inner_size([860.0, 620.0]),
+        viewport,
         ..Default::default()
     };
 

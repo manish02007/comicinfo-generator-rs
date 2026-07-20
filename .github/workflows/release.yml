@@ -78,11 +78,27 @@ jobs:
         run: cargo build --release --target x86_64-unknown-linux-gnu
 
       # ── .tar.gz ──────────────────────────────────────────────────────────
+      # Bundles a desktop entry, icons, and an install.sh alongside the raw
+      # binary. Without these, extracting the tarball and running the
+      # binary directly gives you a bare process with no launcher entry --
+      # exactly the ".desktop file is the missing piece" problem this
+      # packaging exists to solve. install.sh does a user-local install
+      # (~/.local), so no root/sudo is needed.
       - name: Package tar.gz
         run: |
-          cp target/x86_64-unknown-linux-gnu/release/${{ env.BIN }} .
-          tar -czf ${{ env.BIN }}-linux-x64.tar.gz ${{ env.BIN }} README.md
-          rm ${{ env.BIN }}
+          STAGE=${{ env.BIN }}-linux-x64
+          mkdir -p "$STAGE/icons"
+          cp target/x86_64-unknown-linux-gnu/release/${{ env.BIN }} "$STAGE/"
+          cp README.md "$STAGE/"
+          cp packaging/linux/install.sh "$STAGE/"
+          chmod +x "$STAGE/install.sh"
+          cp packaging/linux/comicinfo-generator.desktop "$STAGE/"
+          cp assets/icon.svg "$STAGE/"
+          for size in 16 32 48 64 128 256; do
+            cp "assets/icons/icon_${size}.png" "$STAGE/icons/"
+          done
+          tar -czf "$STAGE.tar.gz" "$STAGE"
+          rm -rf "$STAGE"
 
       # ── .deb ─────────────────────────────────────────────────────────────
       - name: Install cargo-deb
@@ -140,12 +156,32 @@ jobs:
       - name: Build release binary
         run: cargo build --release --target ${{ matrix.target }}
 
-      - name: Package tar.gz
+      # Builds a real .app bundle rather than shipping a bare binary.
+      # macOS (like Linux) needs actual bundle structure -- Info.plist +
+      # Contents/MacOS + Contents/Resources -- to treat this as a real,
+      # double-clickable, Spotlight-searchable, dock-pinnable application;
+      # a lone executable in a tarball has none of that, same underlying
+      # issue as the missing .desktop file on Linux.
+      - name: Package .app bundle
         run: |
-          cp target/${{ matrix.target }}/release/${{ env.BIN }} .
+          APP="ComicInfo Generator.app"
+          MACOS_DIR="$APP/Contents/MacOS"
+          RES_DIR="$APP/Contents/Resources"
+          mkdir -p "$MACOS_DIR" "$RES_DIR"
+
+          cp target/${{ matrix.target }}/release/${{ env.BIN }} \
+             "$MACOS_DIR/${{ env.BIN }}"
+          chmod +x "$MACOS_DIR/${{ env.BIN }}"
+
+          cp assets/icons/icon.icns "$RES_DIR/icon.icns"
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed "s/__VERSION__/$VERSION/g" packaging/macos/Info.plist \
+              > "$APP/Contents/Info.plist"
+
           tar -czf ${{ env.BIN }}-macos-${{ matrix.label }}.tar.gz \
-              ${{ env.BIN }} README.md
-          rm ${{ env.BIN }}
+              "$APP" README.md
+          rm -rf "$APP"
 
       - uses: actions/upload-artifact@v4
         with:

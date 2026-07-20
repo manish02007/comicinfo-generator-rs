@@ -1,0 +1,22 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#241f40"/>
+      <stop offset="1" stop-color="#100e1d"/>
+    </linearGradient>
+    <linearGradient id="page" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ada3ff"/>
+      <stop offset="1" stop-color="#7c6fee"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="512" height="512" rx="108" fill="url(#bg)"/>
+
+  <!-- single bold page/panel shape, slight corner fold -->
+  <path d="M146 108 H322 L366 152 V404 Q366 416 354 416 H146 Q134 416 134 404 V120 Q134 108 146 108 Z"
+        fill="url(#page)"/>
+  <path d="M322 108 L366 152 H334 Q322 152 322 140 Z" fill="#4e46b4"/>
+
+  <!-- one thick corner tag/bracket, high contrast, no fine detail -->
+  <path d="M366 404 Q366 416 354 416 H250 L366 300 Z" fill="#38bde8"/>
+</svg>

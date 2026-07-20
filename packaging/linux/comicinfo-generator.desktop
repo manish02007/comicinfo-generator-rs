@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=ComicInfo Generator
+Comment=Generate and embed ComicInfo.xml metadata into CBZ comic archives
+Exec=comicinfo-generator
+Icon=comicinfo-generator
+Categories=Graphics;Utility;
+Terminal=false
+StartupWMClass=comicinfo-generator

@@ -11,6 +11,7 @@ readme = "README.md"
 keywords = ["comics", "cbz", "metadata", "manga", "gui"]
 categories = ["multimedia", "command-line-utilities"]
 rust-version = "1.80"
+build = "build.rs"
 
 [[bin]]
 name = "comicinfo-generator"
@@ -45,6 +46,11 @@ chrono                = { version = "0.4", features = ["serde"] }
 unicode-normalization = "0.1"
 dirs                  = "5"
 
+# ── App icon (window icon via egui::IconData; decodes the embedded PNG) ──────
+# default-features = false + explicit "png" trims out every other format
+# (jpeg, gif, bmp, ...) this app will never need, keeping the binary lean.
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 # ── Debian / Ubuntu packaging (cargo-deb) ────────────────────────────────────
 [package.metadata.deb]
 maintainer        = "ComicInfo Generator Contributors"
@@ -59,22 +65,88 @@ priority    = "optional"
 assets = [
     ["target/release/comicinfo-generator", "usr/bin/", "755"],
     ["README.md", "usr/share/doc/comicinfo-generator/", "644"],
+    # Desktop entry + icons -- without these, Linux has no way to know this
+    # is a launchable application (shows as a bare process in things like
+    # Mission Center) and it won't appear in any app launcher/menu.
+    ["packaging/linux/comicinfo-generator.desktop", "usr/share/applications/", "644"],
+    ["assets/icon.svg", "usr/share/icons/hicolor/scalable/apps/comicinfo-generator.svg", "644"],
+    ["assets/icons/icon_16.png", "usr/share/icons/hicolor/16x16/apps/comicinfo-generator.png", "644"],
+    ["assets/icons/icon_32.png", "usr/share/icons/hicolor/32x32/apps/comicinfo-generator.png", "644"],
+    ["assets/icons/icon_48.png", "usr/share/icons/hicolor/48x48/apps/comicinfo-generator.png", "644"],
+    ["assets/icons/icon_64.png", "usr/share/icons/hicolor/64x64/apps/comicinfo-generator.png", "644"],
+    ["assets/icons/icon_128.png", "usr/share/icons/hicolor/128x128/apps/comicinfo-generator.png", "644"],
+    ["assets/icons/icon_256.png", "usr/share/icons/hicolor/256x256/apps/comicinfo-generator.png", "644"],
 ]
 
 # ── RPM packaging (cargo-generate-rpm) ───────────────────────────────────────
-[package.metadata.generate-rpm]
-assets = [
-    { source = "target/release/comicinfo-generator",
-      dest   = "/usr/bin/comicinfo-generator",
-      mode   = "755" },
-    { source = "README.md",
-      dest   = "/usr/share/doc/comicinfo-generator/README.md",
-      mode   = "644",
-      doc    = true },
-]
+# Note: [[package.metadata.generate-rpm.assets]] (array-of-tables) is used
+# here instead of inline `{ ... }` tables spread across multiple lines --
+# the latter isn't valid TOML (inline tables must stay on one line) even
+# though some parsers tolerate it loosely.
+[[package.metadata.generate-rpm.assets]]
+source = "target/release/comicinfo-generator"
+dest   = "/usr/bin/comicinfo-generator"
+mode   = "755"
+
+[[package.metadata.generate-rpm.assets]]
+source = "README.md"
+dest   = "/usr/share/doc/comicinfo-generator/README.md"
+mode   = "644"
+doc    = true
+
+# Desktop entry + icons -- see comment on the .deb assets list above;
+# same reasoning applies here.
+[[package.metadata.generate-rpm.assets]]
+source = "packaging/linux/comicinfo-generator.desktop"
+dest   = "/usr/share/applications/comicinfo-generator.desktop"
+mode   = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icon.svg"
+dest   = "/usr/share/icons/hicolor/scalable/apps/comicinfo-generator.svg"
+mode   = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/icon_16.png"
+dest   = "/usr/share/icons/hicolor/16x16/apps/comicinfo-generator.png"
+mode   = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/icon_32.png"
+dest   = "/usr/share/icons/hicolor/32x32/apps/comicinfo-generator.png"
+mode   = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/icon_48.png"
+dest   = "/usr/share/icons/hicolor/48x48/apps/comicinfo-generator.png"
+mode   = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/icon_64.png"
+dest   = "/usr/share/icons/hicolor/64x64/apps/comicinfo-generator.png"
+mode   = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/icon_128.png"
+dest   = "/usr/share/icons/hicolor/128x128/apps/comicinfo-generator.png"
+mode   = "644"
+
+[[package.metadata.generate-rpm.assets]]
+source = "assets/icons/icon_256.png"
+dest   = "/usr/share/icons/hicolor/256x256/apps/comicinfo-generator.png"
+mode   = "644"
 
 [package.metadata.generate-rpm.requires]
 "gtk3" = ">= 3.22"
+
+# ── Windows exe icon embedding (build.rs) ─────────────────────────────────────
+# Not gated with [target.'cfg(windows)'.build-dependencies]: that syntax
+# matches the HOST the build script runs on, not the crate's target, so it
+# would misbehave under cross-compilation (e.g. building for Windows from a
+# Linux host). build.rs itself checks CARGO_CFG_TARGET_OS at runtime and
+# no-ops on non-Windows targets, which is the correct place for that check.
+[build-dependencies]
+winresource = "0.1"
 
 [profile.release]
 opt-level     = 3
