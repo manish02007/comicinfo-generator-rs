@@ -265,6 +265,53 @@ impl ComicInfoApp {
     fn load_config(&mut self, path: &Path) {
         if let Ok(data) = std::fs::read_to_string(path) {
             if let Ok(mut cfg) = serde_json::from_str::<AppConfig>(&data) {
+                // Legacy flat metadata fields (series, writer, publisher, ...)
+                // predate the dynamic metadata_fields list (v0.3.0-beta.1)
+                // and were never named AppConfig struct fields, so the
+                // deserialize above can't see them -- serde's container-level
+                // #[serde(default)] fills a missing metadata_fields key with
+                // AppConfig::default()'s pre-populated starter list (Series,
+                // Writer, ... with empty values), NOT an empty Vec, which is
+                // why the inner logic below overwrites a matching tag rather
+                // than skipping it as "already present". Import already
+                // migrates these via legacy_field_alias/field_spec; Load
+                // needs the same migration since it's just as valid a
+                // source of an old config file, reusing that logic here
+                // rather than duplicating it.
+                if let Ok(raw) = serde_json::from_str::<serde_json::Value>(&data) {
+                    if let Some(map) = raw.as_object() {
+                        for (key, val) in map.iter().filter_map(|(k, v)| v.as_str().map(|s| (k, s))) {
+                            if key.eq_ignore_ascii_case("Summary") {
+                                continue; // Summary already has its own named AppConfig field
+                            }
+                            let resolved = field_spec(key).map(|s| (s.tag, false))
+                                .or_else(|| Self::legacy_field_alias(key));
+                            if let Some((tag, is_legacy_rating)) = resolved {
+                                if is_legacy_rating {
+                                    cfg.community_rating_10_scale = true;
+                                }
+                                // AppConfig::default().metadata_fields (used
+                                // by serde's container-level #[serde(default)]
+                                // to fill in the WHOLE metadata_fields list
+                                // when it's absent from the JSON, which it
+                                // always is in this old flat-field format)
+                                // pre-populates Series/Writer/Publisher/...
+                                // with EMPTY values. So `tag` frequently
+                                // already exists here as an empty starter
+                                // placeholder, not as a real prior value --
+                                // overwrite it in that case instead of
+                                // treating "tag exists" as "already handled,
+                                // skip", which silently discarded the real
+                                // value being migrated in.
+                                if let Some(entry) = cfg.metadata_fields.iter_mut().find(|(t, _)| t == tag) {
+                                    entry.1 = val.to_string();
+                                } else {
+                                    cfg.metadata_fields.push((tag.to_string(), val.to_string()));
+                                }
+                            }
+                        }
+                    }
+                }
                 let loaded_version = cfg.config_version;
                 cfg.config_version = CURRENT_CONFIG_VERSION;
                 self.cfg = cfg;
@@ -3098,8 +3145,6 @@ impl ComicInfoApp {
         const GAPS: f32 = 20.0;     // 2 x 10px add_space between the 3 cards
         let fair_share = ((outer_available_h - 2.0 * outer_margin_v
                             - GAPS - 3.0 * CARD_PAD) / 3.0).max(100.0);
-
-        let fair_share = fair_share - 12.5; // tune this number to shrink/grow all 3 boxes
 
         // Renders one card and pads it up to fair_share if its actual
         // content (measured via ui.scope(), not estimated) is shorter --
