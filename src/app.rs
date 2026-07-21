@@ -3067,20 +3067,39 @@ impl ComicInfoApp {
         // computed once from the tab's height alone, independent of any
         // card's row count -- so a table with enough rows to need more
         // than its fair share just grows past it on its own, with zero
-        // effect on the other two cards' size. (An earlier version
-        // computed one shared "leftover space" pool from all 3 cards'
-        // combined height, which meant growing one card shrank all
-        // three back to bare minimum the moment the total stopped
-        // fitting -- this avoids that entirely.)
+        // effect on the other two cards' size.
+        //
+        // outer_available_h is captured right here, before entering
+        // ScrollArea::vertical() or any nested Frame. This is the one
+        // point where ui.available_height() reliably reports the tab's
+        // real visible height: a plain ScrollArea::vertical() defaults to
+        // an unbounded (max_height = f32::INFINITY) content area by
+        // design, so available_height() called from INSIDE it reports
+        // something tied to that unbounded sizing instead of the real
+        // viewport -- a well-known egui quirk (available_width/height not
+        // reliably accounting for a containing panel's own margins from
+        // inside nested containers).
+        let outer_available_h = ui.available_height();
+
+        // This value is used both for the Frame below and for the height
+        // subtraction above it -- so the two can never silently drift
+        // apart the way separate hardcoded constants did in earlier
+        // attempts at this fix. (Read back via Margin's own l/r/t/b
+        // fields intentionally avoided here: those fields' exact numeric
+        // type isn't worth depending on across egui versions.)
+        let outer_margin_v: f32 = 16.0; // top + bottom, each side
+
         egui::ScrollArea::vertical().id_salt("rules_scr").show(ui, |ui| {
         egui::Frame::none()
-            .inner_margin(egui::Margin::symmetric(20.0, 16.0))
+            .inner_margin(egui::Margin::symmetric(20.0, outer_margin_v))
             .show(ui, |ui| {
 
-        const CARD_PAD: f32 = 28.0;      // theme::card()'s 14px inner_margin, top + bottom
-        const GAPS: f32 = 20.0;          // 2 x 10px add_space between the 3 cards
-        const SAFETY_MARGIN: f32 = 10.0; // small buffer against layout rounding
-        let fair_share = ((ui.available_height() - GAPS - SAFETY_MARGIN) / 3.0).max(100.0);
+        const CARD_PAD: f32 = 28.0; // theme::card()'s 14px inner_margin, top + bottom
+        const GAPS: f32 = 20.0;     // 2 x 10px add_space between the 3 cards
+        let fair_share = ((outer_available_h - 2.0 * outer_margin_v
+                            - GAPS - 3.0 * CARD_PAD) / 3.0).max(100.0);
+
+        let fair_share = fair_share - 12.5; // tune this number to shrink/grow all 3 boxes
 
         // Renders one card and pads it up to fair_share if its actual
         // content (measured via ui.scope(), not estimated) is shorter --
@@ -3088,7 +3107,7 @@ impl ComicInfoApp {
         let rule_card = |ui: &mut egui::Ui, add_contents: &mut dyn FnMut(&mut egui::Ui)| {
             theme::card().show(ui, |ui| {
                 let r = ui.scope(|ui| add_contents(ui));
-                let natural_h = r.response.rect.height() + CARD_PAD;
+                let natural_h = r.response.rect.height();
                 let pad = (fair_share - natural_h).max(0.0);
                 if pad > 0.0 { ui.add_space(pad); }
             });
