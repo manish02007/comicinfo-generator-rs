@@ -181,6 +181,12 @@ pub struct AppSettings {
     // Lives here (persisted separately, survives Reset All) rather than in
     // AppConfig, which Reset All intentionally wipes back to defaults.
     pub preferred_tag_order: Option<Vec<String>>,
+    // Which of the 4 built-in themes is active. Lives here (not AppConfig)
+    // for the same reason backup_before_overwrite does -- an app-wide look
+    // preference shouldn't silently change just because you loaded a
+    // different series' saved job config.
+    #[serde(default)]
+    pub theme: crate::theme::ThemeChoice,
 }
 
 impl Default for AppSettings {
@@ -189,6 +195,7 @@ impl Default for AppSettings {
             backup_before_overwrite: true,   // safety feature: on by default
             play_sound_on_completion: true,  // convenience feature: on by default, easy to disable if noisy
             preferred_tag_order: None,
+            theme: crate::theme::ThemeChoice::default(),
         }
     }
 }
@@ -218,13 +225,13 @@ impl LogLevel {
     pub fn color(self) -> eframe::egui::Color32 {
         use crate::theme::*;
         match self {
-            LogLevel::Ok      => TGOOD,
-            LogLevel::Err     => TERR,
-            LogLevel::Warn    => TWARN,
-            LogLevel::Dim     => TDIM,
-            LogLevel::Head    => ACC2,
-            LogLevel::Sep     => BDR,
-            LogLevel::Renamed => ACC2,
+            LogLevel::Ok      => TGOOD(),
+            LogLevel::Err     => TERR(),
+            LogLevel::Warn    => TWARN(),
+            LogLevel::Dim     => TDIM(),
+            LogLevel::Head    => ACC2(),
+            LogLevel::Sep     => BDR(),
+            LogLevel::Renamed => ACC2(),
         }
     }
 }
