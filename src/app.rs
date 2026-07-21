@@ -2732,6 +2732,7 @@ impl ComicInfoApp {
                             Self::open_in_file_manager(&log_path);
                         }
                     });
+                    ui.add_space(12.0);
                 });
 
                 let rc = &mut cols[1];
@@ -2810,6 +2811,7 @@ impl ComicInfoApp {
                             }
                         });
                     });
+                    ui.add_space(12.0);
                 });
             });
         });
