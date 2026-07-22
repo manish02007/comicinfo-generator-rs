@@ -3146,6 +3146,8 @@ impl ComicInfoApp {
         let fair_share = ((outer_available_h - 2.0 * outer_margin_v
                             - GAPS - 3.0 * CARD_PAD) / 3.0).max(100.0);
 
+        let fair_share = fair_share - 12.5; // tune this number to shrink/grow all 3 boxes
+
         // Renders one card and pads it up to fair_share if its actual
         // content (measured via ui.scope(), not estimated) is shorter --
         // never shrinks it below what its own rows need.

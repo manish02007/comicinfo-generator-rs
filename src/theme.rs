@@ -78,6 +78,7 @@ pub struct Palette {
     pub surf4: Color32,
     pub acc:   Color32,
     pub acc2:  Color32,
+    pub accd:  Color32,
     pub txt:   Color32,
     pub tdim:  Color32,
     pub tmut:  Color32,
@@ -107,6 +108,7 @@ impl Palette {
             surf4: Self::rgb(0x2c, 0x2c, 0x4a),
             acc:   Self::rgb(0x7c, 0x6f, 0xee),
             acc2:  Self::rgb(0xa8, 0x9e, 0xff),
+            accd:  Self::rgb(0x4e, 0x46, 0xb4),
             txt:   Self::rgb(0xea, 0xed, 0xfa),
             tdim:  Self::rgb(0x8a, 0x8e, 0xb8),
             tmut:  Self::rgb(0x55, 0x58, 0x7a),
@@ -131,6 +133,7 @@ impl Palette {
             surf4: Self::rgb(0xd7, 0xda, 0xe9),
             acc:   Self::rgb(0x6d, 0x5c, 0xe8),
             acc2:  Self::rgb(0x57, 0x47, 0xc9),
+            accd:  Self::rgb(0x8b, 0x7c, 0xf0),
             txt:   Self::rgb(0x1c, 0x1e, 0x2b),
             tdim:  Self::rgb(0x5a, 0x5d, 0x75),
             tmut:  Self::rgb(0x94, 0x98, 0xad),
@@ -156,6 +159,7 @@ impl Palette {
             surf4: Self::rgb(0x38, 0x3a, 0x42),
             acc:   Self::rgb(0x5a, 0xa6, 0xf5),
             acc2:  Self::rgb(0x7f, 0xbc, 0xf7),
+            accd:  Self::rgb(0x3a, 0x76, 0xc4),
             txt:   Self::rgb(0xe6, 0xe7, 0xeb),
             tdim:  Self::rgb(0x9a, 0x9c, 0xa6),
             tmut:  Self::rgb(0x66, 0x68, 0x6f),
@@ -182,6 +186,7 @@ impl Palette {
             surf4: Self::rgb(0x45, 0x47, 0x5a), // surface1
             acc:   Self::rgb(0xcb, 0xa6, 0xf7), // mauve
             acc2:  Self::rgb(0xb4, 0xbe, 0xfe), // lavender
+            accd:  Self::rgb(0x58, 0x5b, 0x70), // surface2
             txt:   Self::rgb(0xcd, 0xd6, 0xf4), // text
             tdim:  Self::rgb(0xa6, 0xad, 0xc8), // subtext0
             tmut:  Self::rgb(0x6c, 0x70, 0x86), // overlay0
@@ -211,6 +216,7 @@ impl Palette {
             surf4: Self::lerp(a.surf4, b.surf4, t),
             acc:   Self::lerp(a.acc, b.acc, t),
             acc2:  Self::lerp(a.acc2, b.acc2, t),
+            accd:  Self::lerp(a.accd, b.accd, t),
             txt:   Self::lerp(a.txt, b.txt, t),
             tdim:  Self::lerp(a.tdim, b.tdim, t),
             tmut:  Self::lerp(a.tmut, b.tmut, t),
@@ -354,6 +360,7 @@ pub fn SURF3() -> Color32 { current_palette().surf3 }
 pub fn SURF4() -> Color32 { current_palette().surf4 }
 pub fn ACC()   -> Color32 { current_palette().acc }
 pub fn ACC2()  -> Color32 { current_palette().acc2 }
+pub fn ACCD()  -> Color32 { current_palette().accd }
 pub fn TXT()   -> Color32 { current_palette().txt }
 pub fn TDIM()  -> Color32 { current_palette().tdim }
 pub fn TMUT()  -> Color32 { current_palette().tmut }
@@ -405,27 +412,34 @@ pub fn window_titlebar_with_close(ui: &mut egui::Ui, title: &str, open: &mut boo
 
 fn window_titlebar_impl(ui: &mut egui::Ui, title: &str, open: Option<&mut bool>) {
     egui::Frame::none()
-        .fill(SURF())
-        .inner_margin(Margin::symmetric(12.0, 8.0))
+        .fill(SURF2())
+        .inner_margin(Margin::symmetric(14.0, 10.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(eframe::egui::RichText::new(title)
-                    .size(13.5).color(TXT()).strong());
+                    .size(16.5).color(TXT()).strong());
+
                 if let Some(open) = open {
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(
-                            egui::Button::new(eframe::egui::RichText::new("X").size(13.0).color(TDIM()).strong())
-                                .fill(Color32::TRANSPARENT)
-                                .min_size(egui::vec2(20.0, 20.0))
-                        ).clicked() {
+                        let resp = ui.add(
+                            egui::Button::new(eframe::egui::RichText::new("X").size(12.0).color(TDIM()).strong())
+                                .fill(SURF3())
+                                .stroke(Stroke::new(1.0, BDR()))
+                                .rounding(Rounding::same(11.0)) // circular at this size
+                                .min_size(egui::vec2(22.0, 22.0))
+                        );
+                        if resp.clicked() {
                             *open = false;
                         }
                     });
                 }
             });
         });
-    ui.add_space(2.0);
-    ui.separator();
+    // Solid accent-dark underline instead of a plain ui.separator() line --
+    // gives the title bar a definite designed edge, consistent across all
+    // 4 themes without needing per-theme retuning (verified against each).
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 3.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, Rounding::ZERO, ACCD());
     ui.add_space(6.0);
 }
 
