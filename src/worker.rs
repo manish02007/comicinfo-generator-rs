@@ -12,8 +12,14 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{
     mpsc::{Receiver, Sender},
-    Arc, Mutex,
+    Arc, Mutex, LazyLock,
 };
+
+// Chapter/volume number extraction pattern, shared across every file in a
+// batch instead of being recompiled per file inside process_one -- compiled
+// once, on first use, then reused for the rest of the run (and any later
+// run in the same process).
+static NUM_RE: LazyLock<regex::Regex> = LazyLock::new(|| regex::Regex::new(r"\d+(?:\.\d+)?").unwrap());
 
 // ── Channel messages ──────────────────────────────────────────────────────────
 #[derive(Debug)]
@@ -230,9 +236,12 @@ fn process_one(
         batch.push((format!("  -  {file}  ->  {mode_str}"), LogLevel::Dim));
     }
 
-    // Extract number from filename
-    let num_re = regex::Regex::new(r"\d+(?:\.\d+)?").unwrap();
-    let num_m  = match num_re.find(&file) {
+    // Extract number from filename. Compiled once for the whole run (see
+    // NUM_RE below) rather than per file -- this function runs once per
+    // CBZ in the batch, across parallel rayon threads, so re-compiling the
+    // same pattern every time was a redundant allocation per file for no
+    // benefit (the pattern never changes).
+    let num_m  = match NUM_RE.find(&file) {
         Some(m) => m,
         None => {
             let mut result = vec![(format!("[WARN] no number found - skipping: {file}"), LogLevel::Warn)];

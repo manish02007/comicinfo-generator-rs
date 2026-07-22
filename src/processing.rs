@@ -347,7 +347,7 @@ pub fn build_comic_info_xml(data: &HashMap<String, String>, order: &[String]) ->
 /// instead -- used by the "write new CBZ" output mode. Creates `dest_path`'s
 /// parent directory if it doesn't exist yet.
 pub fn write_comic_info_xml_to(src_path: &Path, dest_path: &Path, xml: &str) -> std::io::Result<()> {
-    use std::io::{Read, Write};
+    use std::io::Write;
     use zip::{write::SimpleFileOptions, CompressionMethod, ZipArchive, ZipWriter};
 
     if let Some(parent) = dest_path.parent() {
@@ -365,15 +365,22 @@ pub fn write_comic_info_xml_to(src_path: &Path, dest_path: &Path, xml: &str) -> 
         let opts = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
 
         for i in 0..archive.len() {
-            let mut f = archive.by_index(i)
+            let f = archive.by_index(i)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
             if f.name() == "ComicInfo.xml" { continue; }
-            let name = f.name().to_owned();
-            writer.start_file(&name, opts)
+            // raw_copy_file streams the entry's existing (already-compressed
+            // or already-stored) bytes straight into the destination archive
+            // via one internal io::copy, rather than this function reading
+            // the whole entry -- a full manga page image, sometimes several
+            // MB -- into a Vec<u8> first. That buffering happened once per
+            // entry regardless, but with rayon running multiple CBZs in
+            // parallel (max_workers threads), peak memory scaled with
+            // worker count x largest single image in the batch. This also
+            // preserves whatever compression the source entry already had
+            // instead of forcing it through Stored -- never a regression,
+            // since raw_copy_file only ever copies bytes, never re-compresses.
+            writer.raw_copy_file(f)
                   .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-            let mut buf = Vec::new();
-            f.read_to_end(&mut buf)?;
-            writer.write_all(&buf)?;
         }
         writer.start_file("ComicInfo.xml", opts)
               .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;

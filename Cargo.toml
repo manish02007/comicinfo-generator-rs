@@ -150,9 +150,15 @@ winresource = "0.1"
 
 [profile.release]
 opt-level     = 3
-lto           = "thin"
+# Fat LTO (vs the previous "thin") and a single codegen unit both trade a
+# slower release build for a smaller, more thoroughly optimized binary --
+# LLVM can see and eliminate dead code / inline across the whole crate
+# graph instead of per-codegen-unit. Only affects `cargo build --release`
+# / packaging, not everyday `cargo build`, so the slower compile only
+# costs time when actually cutting a release.
+lto           = true
 strip         = true
-codegen-units = 4
+codegen-units = 1
 
 [profile.dev]
 # opt-level 1 makes the debug binary noticeably faster to start up
