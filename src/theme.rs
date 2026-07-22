@@ -424,7 +424,7 @@ fn window_titlebar_impl(ui: &mut egui::Ui, title: &str, open: Option<&mut bool>)
                         let resp = ui.add(
                             egui::Button::new(eframe::egui::RichText::new("X").size(12.0).color(TDIM()).strong())
                                 .fill(SURF3())
-                                .stroke(Stroke::new(1.0, BDR()))
+                                .stroke(Stroke::new(1.0_f32, BDR()))
                                 .rounding(Rounding::same(11.0)) // circular at this size
                                 .min_size(egui::vec2(22.0, 22.0))
                         );
@@ -448,7 +448,7 @@ pub fn card() -> egui::Frame {
     egui::Frame::none()
         .fill(SURF2())
         .rounding(Rounding::same(8.0))
-        .stroke(Stroke::new(1.0, BDR()))
+        .stroke(Stroke::new(1.0_f32, BDR()))
         .inner_margin(Margin::same(14.0))
 }
 
@@ -469,7 +469,7 @@ pub fn btn_secondary(label: impl Into<String>) -> egui::Button<'static> {
             .color(TXT()).size(12.0)
     )
     .fill(BTN_SECONDARY_BG())
-    .stroke(Stroke::new(1.0, BDR()))
+    .stroke(Stroke::new(1.0_f32, BDR()))
     .rounding(Rounding::same(6.0))
     .min_size(egui::vec2(0.0, 28.0))
 }
@@ -517,7 +517,7 @@ pub fn section_hdr_with_help(ui: &mut egui::Ui, title: &str, help_clicked: &mut 
             if ui.add(
                 egui::Button::new(eframe::egui::RichText::new("?").size(11.0).color(TDIM()).strong())
                     .fill(Color32::TRANSPARENT)
-                    .stroke(Stroke::new(1.0, BDR()))
+                    .stroke(Stroke::new(1.0_f32, BDR()))
                     .rounding(Rounding::same(9.0))
                     .min_size(egui::vec2(18.0, 18.0))
             ).on_hover_text("What does this do?").clicked() {
@@ -542,7 +542,7 @@ pub fn setup_style(ctx: &egui::Context) {
     vis.extreme_bg_color     = BG();
     vis.faint_bg_color       = SURF2();
     vis.code_bg_color        = SURF3();
-    vis.window_stroke        = Stroke::new(1.0, BDR());
+    vis.window_stroke        = Stroke::new(1.0_f32, BDR());
     vis.window_rounding      = Rounding::same(10.0);
     vis.menu_rounding        = Rounding::same(8.0);
     vis.window_shadow        = Shadow::NONE;
@@ -554,8 +554,8 @@ pub fn setup_style(ctx: &egui::Context) {
     macro_rules! wset {
         ($w:expr, fill=$f:expr, stroke=$s:expr, fg=$fg:expr) => {
             $w.bg_fill   = $f;
-            $w.bg_stroke = Stroke::new(1.0, $s);
-            $w.fg_stroke = Stroke::new(1.5, $fg);
+            $w.bg_stroke = Stroke::new(1.0_f32, $s);
+            $w.fg_stroke = Stroke::new(1.5_f32, $fg);
             $w.rounding  = Rounding::same(5.0);
             $w.expansion = 0.0;
         };
@@ -567,7 +567,7 @@ pub fn setup_style(ctx: &egui::Context) {
     wset!(vis.widgets.open,           fill=SURF3(), stroke=ACC(),  fg=TXT());
 
     vis.selection.bg_fill = ACC();
-    vis.selection.stroke  = Stroke::new(1.0, ACC2());
+    vis.selection.stroke  = Stroke::new(1.0_f32, ACC2());
 
     ctx.set_visuals(vis);
 

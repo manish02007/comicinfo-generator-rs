@@ -1637,7 +1637,7 @@ impl ComicInfoApp {
                                     let resp = ui.add(
                                         egui::Button::new(RichText::new(spec.label).color(theme::TXT()).size(12.0))
                                             .fill(theme::SURF3())
-                                            .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                                            .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                                             .rounding(egui::Rounding::same(4.0))
                                             .min_size(egui::vec2(ui.available_width(), 26.0))
                                     ).on_hover_text(spec.tip);
@@ -1853,15 +1853,15 @@ impl eframe::App for ComicInfoApp {
         // panel sizes itself naturally around its content and that content
         // ends up truly centered -- no guessed exact_height() + leftover slack.
         egui::TopBottomPanel::top("toolbar")
-            .frame(egui::Frame::none().fill(theme::SURF()).stroke(egui::Stroke::new(1.0, theme::BDR()))
+            .frame(egui::Frame::none().fill(theme::SURF()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                 .inner_margin(egui::Margin::symmetric(8.0, 8.0)))
             .show(ctx, |ui| self.show_toolbar(ui));
         egui::TopBottomPanel::bottom("statusbar")
-            .frame(egui::Frame::none().fill(theme::BG()).stroke(egui::Stroke::new(1.0, theme::BDR()))
+            .frame(egui::Frame::none().fill(theme::BG()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                 .inner_margin(egui::Margin::symmetric(12.0, 6.0)))
             .show(ctx, |ui| self.show_statusbar(ui));
         egui::TopBottomPanel::top("tabbar")
-            .frame(egui::Frame::none().fill(theme::SURF()).stroke(egui::Stroke::new(1.0, theme::BDR()))
+            .frame(egui::Frame::none().fill(theme::SURF()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                 .inner_margin(egui::Margin::symmetric(14.0, 8.0)))
             .show(ctx, |ui| self.show_tabbar(ui));
         egui::CentralPanel::default()
@@ -1950,7 +1950,7 @@ impl ComicInfoApp {
                             .color(if active { theme::ON_ACCENT() } else { theme::TDIM() })
                     )
                     .fill(if active { theme::ACC() } else { Color32::TRANSPARENT })
-                    .stroke(egui::Stroke::new(1.0,
+                    .stroke(egui::Stroke::new(1.0_f32,
                         if active { theme::ACC() } else { theme::BDR() }))
                     .rounding(egui::Rounding::same(18.0))
                     .min_size(egui::vec2(0.0, 28.0))
@@ -2000,7 +2000,7 @@ impl ComicInfoApp {
                     btn = if selected {
                         btn.fill(theme::ACC())
                     } else {
-                        btn.fill(theme::SURF3()).stroke(egui::Stroke::new(1.0, theme::BDR()))
+                        btn.fill(theme::SURF3()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                     };
                     if ui.add(btn).clicked() && !selected {
                         theme::set_theme(choice);
@@ -2110,7 +2110,7 @@ impl ComicInfoApp {
         ui.add(
             egui::Button::new(RichText::new("?").size(11.0).color(theme::TDIM()).strong())
                 .fill(Color32::TRANSPARENT)
-                .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                 .rounding(egui::Rounding::same(9.0))
                 .min_size(egui::vec2(18.0, 18.0))
         ).on_hover_text("What does this do?").clicked()
@@ -2127,7 +2127,7 @@ impl ComicInfoApp {
                 if ui.add(
                     egui::Button::new(RichText::new("Browse").size(11.5).color(theme::TXT()))
                         .fill(theme::SURF3())
-                        .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                        .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                         .rounding(egui::Rounding::same(5.0))
                         .min_size(egui::vec2(74.0, 26.0))
                 ).clicked() { clicked = true; }
@@ -2341,7 +2341,7 @@ impl ComicInfoApp {
                     handle.ui(ui, |ui| {
                         egui::Frame::none()
                             .fill(theme::SURF3())
-                            .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                            .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                             .rounding(egui::Rounding::same(4.0))
                             .inner_margin(egui::Margin::symmetric(8.0, 5.0))
                             .show(ui, |ui| {
@@ -2459,7 +2459,7 @@ impl ComicInfoApp {
                     pending = Some(Dialog::HelpText { title: title.to_string(), body });
                 }
                 ui.add_space(2.0);
-                if ui.add(egui::Button::new(RichText::new("Remove").size(11.0).color(theme::TERR())).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR())).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
+                if ui.add(egui::Button::new(RichText::new("Remove").size(11.0).color(theme::TERR())).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0_f32, theme::BDR())).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
                     if let Some(idx) = *sel {
                         if idx < rows.len() { rows.remove(idx); }
                         *sel = None;
@@ -2468,7 +2468,7 @@ impl ComicInfoApp {
                     }
                 }
                 ui.add_space(2.0);
-                if ui.add(egui::Button::new(RichText::new("Edit").size(11.0).color(theme::ACC2())).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR())).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
+                if ui.add(egui::Button::new(RichText::new("Edit").size(11.0).color(theme::ACC2())).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0_f32, theme::BDR())).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
                     if let Some(idx) = *sel {
                         if let Some(row) = rows.get(idx) {
                             let vals = padded(row, cols.len());
@@ -2489,7 +2489,7 @@ impl ComicInfoApp {
                     }
                 }
                 ui.add_space(2.0);
-                if ui.add(egui::Button::new(RichText::new("Add").size(11.0).color(theme::TGOOD())).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0, theme::BDR())).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
+                if ui.add(egui::Button::new(RichText::new("Add").size(11.0).color(theme::TGOOD())).fill(Color32::TRANSPARENT).stroke(egui::Stroke::new(1.0_f32, theme::BDR())).rounding(egui::Rounding::same(5.0)).min_size(egui::vec2(0.0,24.0))).clicked() {
                     pending = Some(Dialog::EditRule(RuleEditState {
                         target, row_idx: None, is_new: true,
                         labels: cols.iter().map(|(h,_)| h.to_string()).collect(),
@@ -2627,7 +2627,7 @@ impl ComicInfoApp {
                                 if ui.add(
                                     egui::Button::new(RichText::new("Browse").size(11.5).color(theme::TXT()))
                                         .fill(theme::SURF3())
-                                        .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                                        .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                                         .rounding(egui::Rounding::same(5.0))
                                         .min_size(egui::vec2(74.0, 26.0))
                                 ).clicked() {
@@ -2771,7 +2771,7 @@ impl ComicInfoApp {
                         if ui.add(
                             egui::Button::new(RichText::new("Open Folder").size(11.0).color(theme::TDIM()))
                                 .fill(Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                                .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                                 .rounding(egui::Rounding::same(4.0))
                                 .min_size(egui::vec2(0.0, 20.0))
                         ).on_hover_text("Open the folder containing progress and error logs for past runs.").clicked() {
@@ -2903,7 +2903,7 @@ impl ComicInfoApp {
                         if ui.add(
                             egui::Button::new(RichText::new("Remove").size(11.0).color(theme::TERR()))
                                 .fill(Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                                .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                                 .rounding(egui::Rounding::same(5.0))
                                 .min_size(egui::vec2(0.0, 24.0))
                         ).on_hover_text("Remove the selected field below.").clicked() {
@@ -2913,7 +2913,7 @@ impl ComicInfoApp {
                         if ui.add(
                             egui::Button::new(RichText::new("Add Tag").size(11.0).color(theme::TGOOD()))
                                 .fill(Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                                .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                                 .rounding(egui::Rounding::same(5.0))
                                 .min_size(egui::vec2(0.0, 24.0))
                         ).on_hover_text("Add another ComicInfo field.").clicked() {
@@ -2923,7 +2923,7 @@ impl ComicInfoApp {
                         if ui.add(
                             egui::Button::new(RichText::new("Tag Order").size(11.0).color(theme::ACC()))
                                 .fill(Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                                .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                                 .rounding(egui::Rounding::same(5.0))
                                 .min_size(egui::vec2(0.0, 24.0))
                         ).on_hover_text("See and drag to rearrange the order tags are written to ComicInfo.xml.").clicked() {
@@ -3146,7 +3146,7 @@ impl ComicInfoApp {
         let fair_share = ((outer_available_h - 2.0 * outer_margin_v
                             - GAPS - 3.0 * CARD_PAD) / 3.0).max(100.0);
 
-        let fair_share = fair_share - 12.5; // tune this number to shrink/grow all 3 boxes
+        let fair_share = fair_share - 12.5;
 
         // Renders one card and pads it up to fair_share if its actual
         // content (measured via ui.scope(), not estimated) is shorter --
@@ -3196,7 +3196,7 @@ impl ComicInfoApp {
         // ── Control bar ──────────────────────────────────────────────────────
         egui::Frame::none()
             .fill(theme::SURF())
-            .stroke(egui::Stroke::new(1.0, theme::BDR()))
+            .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
             .rounding(egui::Rounding::same(8.0))
             .inner_margin(egui::Margin::symmetric(16.0, 6.0))
             .show(ui, |ui| {
@@ -3225,7 +3225,7 @@ impl ComicInfoApp {
                             RichText::new("  Stop  ").color(stop_col).size(13.0)
                         )
                         .fill(Color32::from_rgba_unmultiplied(0xf8, 0x71, 0x71, 18))
-                        .stroke(egui::Stroke::new(1.5, stop_col))
+                        .stroke(egui::Stroke::new(1.5_f32, stop_col))
                         .rounding(egui::Rounding::same(8.0))
                         .min_size(egui::vec2(0.0, 32.0)),
                     );
@@ -3309,7 +3309,7 @@ impl ComicInfoApp {
         // ── Log header ────────────────────────────────────────────────────────
         egui::Frame::none()
             .fill(theme::SURF2())
-            .stroke(egui::Stroke::new(1.0, theme::BDR()))
+            .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
             .rounding(egui::Rounding::same(8.0))
             .inner_margin(egui::Margin::symmetric(14.0, 6.0))
             .show(ui, |ui| {
@@ -3321,7 +3321,7 @@ impl ComicInfoApp {
                         if ui.add(
                             egui::Button::new(RichText::new("Clear").size(11.0).color(theme::TDIM()))
                                 .fill(Color32::TRANSPARENT)
-                                .stroke(egui::Stroke::new(1.0, theme::BDR()))
+                                .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                                 .rounding(egui::Rounding::same(4.0))
                         ).clicked() {
                             let has_content = !self.log.is_empty()
@@ -3404,7 +3404,7 @@ impl ComicInfoApp {
         // ── Stats bar ─────────────────────────────────────────────────────────
         egui::Frame::none()
             .fill(theme::SURF())
-            .stroke(egui::Stroke::new(1.0, theme::BDR()))
+            .stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
             .rounding(egui::Rounding::same(8.0))
             .inner_margin(egui::Margin::symmetric(16.0, 8.0))
             .show(ui, |ui| {
