@@ -17,7 +17,17 @@ name: Release
 on:
   push:
     tags:
-      - "v[0-9]+.[0-9]+.[0-9]*"
+      # Matches both plain releases (v1.0.0) and this project's actual
+      # convention so far, prerelease tags like v0.6.0-beta.1
+      # (v0.1.0-beta.1 through v0.5.0-beta.1 in the existing history).
+      # The previous pattern, v[0-9]+.[0-9]+.[0-9]*, only allowed digits
+      # after the patch version -- [0-9]* matches zero-or-more DIGITS, not
+      # arbitrary trailing text, so it silently never matched a "-beta.1"
+      # suffix and this workflow has likely never actually triggered for
+      # any tag pushed to this repo. "v*.*.*" is deliberately broad (any
+      # characters after each dot) rather than trying to hand-enumerate
+      # every prerelease naming scheme in the glob itself.
+      - "v*.*.*"
 
 env:
   CARGO_TERM_COLOR: always
