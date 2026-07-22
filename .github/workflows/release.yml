@@ -131,7 +131,18 @@ jobs:
           mkdir -p target/release
           cp target/x86_64-unknown-linux-gnu/release/${{ env.BIN }} \
              target/release/${{ env.BIN }}
-          cargo generate-rpm --target x86_64-unknown-linux-gnu
+          # RPM version strings cannot contain a hyphen at all (a hard
+          # rpmbuild error -- unlike Debian, which tolerates one hyphen by
+          # splitting upstream_version/debian_revision at it). RPM's own
+          # convention for a prerelease marker is a tilde instead, so swap
+          # any "-" in Cargo.toml's version for "~" just for this step,
+          # via cargo-generate-rpm's -s/--set-metadata override -- this
+          # leaves Cargo.toml's real (valid semver) version untouched,
+          # since About screen / exe metadata / .deb / macOS bundle all
+          # still need the real "0.6.0-beta.1" form.
+          RPM_VERSION=$(grep '^version' Cargo.toml | head -1 | sed -E 's/.*"(.*)".*/\1/' | tr '-' '~')
+          cargo generate-rpm --target x86_64-unknown-linux-gnu \
+            -s "version = \"$RPM_VERSION\""
           RPM=$(ls target/x86_64-unknown-linux-gnu/generate-rpm/*.rpm | head -1)
           cp "$RPM" ${{ env.BIN }}-linux-x64.rpm
 
