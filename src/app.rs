@@ -51,7 +51,7 @@ fn play_completion_sound() {
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
-#[derive(Clone, Copy, PartialEq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Tab { #[default] Paths, Processing, Metadata, Rules, Run }
 
 // ── Rule-edit dialog state ────────────────────────────────────────────────────
@@ -125,6 +125,17 @@ pub struct DisplayStats {
 pub struct ComicInfoApp {
     pub cfg:   AppConfig,
     pub tab:   Tab,
+    // Last frame's tab, and when the switch to it happened -- used to
+    // compute the tab-fade-in animation's progress directly from elapsed
+    // wall-clock time (see update()), rather than relying on egui's
+    // animate_bool_with_time, whose per-Id memory only starts at 0.0 the
+    // very first time that Id is ever queried. Since a tab's Id would
+    // already be "settled" at 1.0 from any earlier visit, later visits
+    // showed no animation at all -- this timer-based approach sidesteps
+    // that by tracking the switch ourselves, same pattern already used
+    // for the theme cross-fade's Transition struct.
+    pub prev_tab: Tab,
+    pub tab_switched_at: std::time::Instant,
     pub sep_preview: String,
     pub status:      String,
     pub verbose:     bool,
@@ -183,6 +194,10 @@ impl ComicInfoApp {
         let mut app = Self {
             cfg:         AppConfig::default(),
             tab:         Tab::default(),
+            prev_tab:    Tab::default(),
+            tab_switched_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
             sep_preview: String::new(),
             status:      "Ready.".to_string(),
             verbose:     false,
@@ -1867,6 +1882,36 @@ impl eframe::App for ComicInfoApp {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG()))
             .show(ctx, |ui| {
+                // Fade the incoming tab's content in over ~180ms rather
+                // than a hard cut. Progress is computed directly from
+                // elapsed wall-clock time since the last detected switch
+                // (self.tab != self.prev_tab resets tab_switched_at to
+                // now), the same pattern already used for the theme
+                // cross-fade's Transition struct -- this sidesteps
+                // egui's animate_bool_with_time entirely, whose per-Id
+                // memory only starts at 0.0 the very first time that Id
+                // is ever queried; every later revisit to an
+                // already-seen tab would just recall its
+                // previously-settled 1.0 with no animation, which is
+                // why the fade appeared to stop working after the first
+                // pass through the tabs. Only the tab's own content
+                // fades; the panel background (filled above) stays
+                // fully opaque throughout so there's no flash of the
+                // window behind it.
+                if self.tab != self.prev_tab {
+                    self.prev_tab = self.tab;
+                    self.tab_switched_at = std::time::Instant::now();
+                }
+                const FADE_SECS: f32 = 0.18;
+                let elapsed = self.tab_switched_at.elapsed().as_secs_f32();
+                let raw = (elapsed / FADE_SECS).clamp(0.0, 1.0);
+                // ease-out cubic, same easing curve as the theme cross-fade
+                let opacity = 1.0 - (1.0 - raw).powi(3);
+                ui.set_opacity(opacity);
+                if raw < 1.0 {
+                    ctx.request_repaint();
+                }
+
                 match self.tab {
                     Tab::Paths      => self.show_paths(ui),
                     Tab::Processing => self.show_processing(ui),
