@@ -2035,23 +2035,38 @@ impl ComicInfoApp {
                 ui.add_space(10.0);
                 theme::section_hdr(ui, "Theme");
                 let current = theme::current_choice();
-                for choice in theme::ThemeChoice::ALL {
-                    let selected = choice == current;
-                    let mut btn = egui::Button::new(
-                        RichText::new(choice.label()).size(12.0)
-                            .color(if selected { theme::ON_ACCENT() } else { theme::TXT() })
-                    )
-                    .min_size(egui::vec2(ui.available_width(), 26.0));
-                    btn = if selected {
-                        btn.fill(theme::ACC())
-                    } else {
-                        btn.fill(theme::SURF3()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
-                    };
-                    if ui.add(btn).clicked() && !selected {
-                        theme::set_theme(choice);
-                        self.settings.theme = choice;
-                        self.save_settings();
-                    }
+                // egui already inserts item_spacing.x (8px, set in
+                // theme::setup_style) between widgets placed side by side
+                // in a ui.horizontal() -- this must be subtracted from the
+                // row width budget here, not added again on top of it,
+                // or the two buttons' combined width overflows what the
+                // window actually sized itself for. Combined with this
+                // window's RIGHT_TOP anchor, that overflow pushed the
+                // whole window leftward past the screen edge to
+                // accommodate the wider-than-budgeted row.
+                let row_w = ui.available_width();
+                let btn_w = (row_w - ui.spacing().item_spacing.x) / 2.0;
+                for pair in theme::ThemeChoice::ALL.chunks(2) {
+                    ui.horizontal(|ui| {
+                        for &choice in pair.iter() {
+                            let selected = choice == current;
+                            let mut btn = egui::Button::new(
+                                RichText::new(choice.label()).size(12.0)
+                                    .color(if selected { theme::ON_ACCENT() } else { theme::TXT() })
+                            )
+                            .min_size(egui::vec2(btn_w, 26.0));
+                            btn = if selected {
+                                btn.fill(theme::ACC())
+                            } else {
+                                btn.fill(theme::SURF3()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
+                            };
+                            if ui.add(btn).clicked() && !selected {
+                                theme::set_theme(choice);
+                                self.settings.theme = choice;
+                                self.save_settings();
+                            }
+                        }
+                    });
                     ui.add_space(4.0);
                 }
 
