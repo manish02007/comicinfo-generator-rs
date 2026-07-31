@@ -136,6 +136,18 @@ pub struct ComicInfoApp {
     // for the theme cross-fade's Transition struct.
     pub prev_tab: Tab,
     pub tab_switched_at: std::time::Instant,
+    // Whether self.dialog was Some(_) last frame, and when it most
+    // recently transitioned from None to Some -- drives the same
+    // fade-in treatment as tabs for popup/dialog windows (Notice,
+    // Confirm Reset, the "?" help windows, Settings, etc). Dialog
+    // carries variant data that doesn't cleanly derive PartialEq/Hash
+    // (Vec<PathBuf>, HashSet<String>, ...), so this only tracks the
+    // None/Some transition rather than which specific dialog is
+    // showing -- sufficient since dialogs are modal (only one shown at
+    // a time) and this app never swaps directly from one dialog type
+    // to another without a None frame in between.
+    pub dialog_was_open: bool,
+    pub dialog_opened_at: std::time::Instant,
     pub sep_preview: String,
     pub status:      String,
     pub verbose:     bool,
@@ -143,6 +155,8 @@ pub struct ComicInfoApp {
     // persisted separately from AppConfig, see state.rs::AppSettings.
     pub settings:      AppSettings,
     pub settings_open: bool,
+    pub settings_was_open: bool,
+    pub settings_opened_at: std::time::Instant,
     // Tag Order dialog's "show only active tags" filter -- a view
     // preference for that dialog, not config data, so it lives here rather
     // than in AppConfig (doesn't get saved/loaded with a job config).
@@ -198,11 +212,19 @@ impl ComicInfoApp {
             tab_switched_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(1))
                 .unwrap_or_else(std::time::Instant::now),
+            dialog_was_open: false,
+            dialog_opened_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
             sep_preview: String::new(),
             status:      "Ready.".to_string(),
             verbose:     false,
             settings:      AppSettings::default(),
             settings_open: false,
+            settings_was_open: false,
+            settings_opened_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
             reorder_show_active_only: false,
             reorder_button_row_h: 44.0, // generous first-frame guess; corrected next frame
             vol_sel:     None, date_sel: None, summ_sel: None, meta_field_sel: None,
@@ -1210,7 +1232,31 @@ impl ComicInfoApp {
 
     // ── Dialogs ───────────────────────────────────────────────────────────────
     fn render_dialogs(&mut self, ctx: &egui::Context) {
-        let Some(dlg) = self.dialog.take() else { return };
+        let Some(dlg) = self.dialog.take() else {
+            self.dialog_was_open = false;
+            return;
+        };
+        // Fade this dialog's window in over ~150ms, same timer-based
+        // approach as the tab-content fade (see update()) rather than
+        // egui's animate_bool_with_time, for the same reason: reopening
+        // a dialog you'd already seen before in this session would
+        // otherwise show no animation, since that Id would already be
+        // "settled" at 1.0 from its last appearance. dialog_was_open
+        // tracks only the None-to-Some transition (not which specific
+        // Dialog variant), which is enough here since only one dialog
+        // is ever shown at a time.
+        if !self.dialog_was_open {
+            self.dialog_opened_at = std::time::Instant::now();
+        }
+        self.dialog_was_open = true;
+        const DIALOG_FADE_SECS: f32 = 0.15;
+        let elapsed = self.dialog_opened_at.elapsed().as_secs_f32();
+        let raw = (elapsed / DIALOG_FADE_SECS).clamp(0.0, 1.0);
+        let dialog_opacity = 1.0 - (1.0 - raw).powi(3); // ease-out cubic
+        if raw < 1.0 {
+            ctx.request_repaint();
+        }
+
         match dlg {
             Dialog::EditRule(mut s) => {
                 let mut saved = false; let mut cancelled = false;
@@ -1273,6 +1319,7 @@ impl ComicInfoApp {
                     .resizable(true).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, rule_dialog_title);
                         if same_start_end_applicable {
                             // s.same_start_end is real, persistent state
@@ -1388,6 +1435,7 @@ impl ComicInfoApp {
                     .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Decimal Chapter");
                         ui.label(RichText::new("Decimal Chapter Detected").color(theme::TWARN()).strong().size(13.0));
                         ui.separator();
@@ -1425,6 +1473,7 @@ impl ComicInfoApp {
                     .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
                     .show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Previous Session Found");
                         ui.label(format!("{count} files already processed in a previous run."));
                         ui.add_space(8.0);
@@ -1458,6 +1507,7 @@ impl ComicInfoApp {
                     .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
                     .show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Final Chapter Detected");
                         ui.label(RichText::new(format!("Chapter {finale_num} is the last chapter.")).strong());
                         ui.add_space(6.0);
@@ -1481,6 +1531,7 @@ impl ComicInfoApp {
                 let mut ok_clicked = false;
                 egui::Window::new("Notice").title_bar(false).resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Notice");
                         ui.label(&msg); ui.add_space(8.0);
                         if ui.add(theme::btn_secondary("  OK  ")).clicked() { ok_clicked = true; }
@@ -1496,6 +1547,7 @@ impl ComicInfoApp {
                     .resizable(true).collapsible(false)
                     .default_width(440.0)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, &title);
                         egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                             ui.label(RichText::new(&body).size(12.5));
@@ -1510,6 +1562,7 @@ impl ComicInfoApp {
                 let mut yes = false; let mut cancel = false;
                 egui::Window::new("Confirm Reset").title_bar(false).resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Confirm Reset");
                         ui.label("Clear ALL settings, metadata, paths and rules?\nThis cannot be undone.");
                         ui.add_space(8.0);
@@ -1532,6 +1585,7 @@ impl ComicInfoApp {
                 };
                 egui::Window::new("Confirm Remove").title_bar(false).resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Confirm Remove");
                         ui.label(format!(
                             "No rule is selected. Remove all {count} rule(s) in {name}?\nThis cannot be undone."
@@ -1558,6 +1612,7 @@ impl ComicInfoApp {
                 let mut yes = false; let mut cancel = false;
                 egui::Window::new("Clear Log").title_bar(false).resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Clear Log");
                         ui.label("Clear the log output?\nThis only clears the displayed log, not the on-disk progress or error logs.");
                         ui.add_space(8.0);
@@ -1585,6 +1640,7 @@ impl ComicInfoApp {
                     .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Empty Metadata Fields");
                         ui.label(RichText::new(
                             "These fields are empty and will be blank in every generated file:"
@@ -1638,6 +1694,7 @@ impl ComicInfoApp {
                     .min_width(320.0)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Add Metadata Tag");
                         ui.label(RichText::new("Choose a field to add:")
                             .color(theme::TDIM()).size(11.0));
@@ -1729,6 +1786,7 @@ impl ComicInfoApp {
                                 .min_width(300.0)
                                 .default_pos(egui::pos2(360.0, 120.0))
                                 .show(ctx, |ui| {
+                                    ui.set_opacity(dialog_opacity);
                                     theme::window_titlebar(ui, "Tag Order");
                                     self.reorder_tags_contents(ui, &active, &mut reset, &mut set_default, &mut open);
                                 });
@@ -1768,6 +1826,7 @@ impl ComicInfoApp {
                     .min_width(480.0)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                     .show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
                         theme::window_titlebar(ui, "Import Successful");
                         // Header
                         ui.label(
@@ -2011,7 +2070,22 @@ impl ComicInfoApp {
     // each toggle saves to disk immediately on change, no separate Save
     // button, since there's nothing here worth risking losing on a crash.
     fn show_settings_window(&mut self, ctx: &egui::Context) {
-        if !self.settings_open { return; }
+        if !self.settings_open {
+            self.settings_was_open = false;
+            return;
+        }
+        if !self.settings_was_open {
+            self.settings_opened_at = std::time::Instant::now();
+        }
+        self.settings_was_open = true;
+        const SETTINGS_FADE_SECS: f32 = 0.15;
+        let elapsed = self.settings_opened_at.elapsed().as_secs_f32();
+        let raw = (elapsed / SETTINGS_FADE_SECS).clamp(0.0, 1.0);
+        let settings_opacity = 1.0 - (1.0 - raw).powi(3);
+        if raw < 1.0 {
+            ctx.request_repaint();
+        }
+
         let mut open = true;
         egui::Window::new("Settings")
             .title_bar(false)
@@ -2019,6 +2093,7 @@ impl ComicInfoApp {
             .collapsible(false)
             .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
             .show(ctx, |ui| {
+                ui.set_opacity(settings_opacity);
                 theme::window_titlebar_with_close(ui, "Settings", &mut open);
                 ui.set_min_width(280.0);
                 theme::section_hdr(ui, "Safety");
@@ -3205,7 +3280,6 @@ impl ComicInfoApp {
         const GAPS: f32 = 20.0;     // 2 x 10px add_space between the 3 cards
         let fair_share = ((outer_available_h - 2.0 * outer_margin_v
                             - GAPS - 3.0 * CARD_PAD) / 3.0).max(100.0);
-
         let fair_share = fair_share - 12.5;
 
         // Renders one card and pads it up to fair_share if its actual
