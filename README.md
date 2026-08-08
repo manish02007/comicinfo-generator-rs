@@ -62,6 +62,35 @@ register a proper desktop entry and icon so the app shows up correctly in
 your application launcher and task switcher instead of as a bare process.
 The macOS tarballs contain a real `.app` bundle.
 
+### macOS: "app is damaged and can't be opened"
+
+Neither macOS build is code-signed or notarized (that needs a paid Apple
+Developer account), so Gatekeeper quarantines both `.app` bundles the
+first time they're opened. On Apple Silicon (arm64) this quarantine
+check is stricter than on Intel and blocks the app outright with a
+message claiming it's damaged or corrupted — it isn't; the download is
+fine, this is just Gatekeeper refusing to run an unsigned app and
+wording it misleadingly. Intel Macs (or Apple Silicon running the
+Intel build under Rosetta) usually get a milder "unidentified
+developer" prompt instead, which is why this tends to only get
+reported on M-series Macs.
+
+Clear the quarantine flag once, after unzipping, and it'll open
+normally from then on:
+
+```bash
+xattr -cr "ComicInfo Generator.app"
+```
+
+On current macOS versions, right-click → Open no longer reliably
+bypasses this specific "damaged" message the way it does for the
+milder "unidentified developer" warning, so the command above is the
+dependable fix. If you'd rather avoid Terminal, the alternative is
+System Settings → Privacy & Security → scroll to Security → click
+**Open Anyway** next to the ComicInfo Generator warning (only appears
+after you've tried opening the app at least once). Either only needs
+doing once per download.
+
 ---
 
 ## Building from source
