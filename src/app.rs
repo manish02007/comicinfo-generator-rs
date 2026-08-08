@@ -148,6 +148,15 @@ pub struct ComicInfoApp {
     // to another without a None frame in between.
     pub dialog_was_open: bool,
     pub dialog_opened_at: std::time::Instant,
+    // Fade-out companions to the fade-in fields above. last_dialog holds
+    // onto the most recently shown dialog's data during its close
+    // animation -- self.dialog itself is already None by the time
+    // closing starts (that's exactly how a close is detected), so
+    // something has to keep the content around to keep rendering it
+    // while it fades. dialog_closing/dialog_closed_at drive that timer.
+    pub last_dialog: Option<Dialog>,
+    pub dialog_closing: bool,
+    pub dialog_closed_at: std::time::Instant,
     pub sep_preview: String,
     pub status:      String,
     pub verbose:     bool,
@@ -157,6 +166,8 @@ pub struct ComicInfoApp {
     pub settings_open: bool,
     pub settings_was_open: bool,
     pub settings_opened_at: std::time::Instant,
+    pub settings_closing: bool,
+    pub settings_closed_at: std::time::Instant,
     // Tag Order dialog's "show only active tags" filter -- a view
     // preference for that dialog, not config data, so it lives here rather
     // than in AppConfig (doesn't get saved/loaded with a job config).
@@ -216,6 +227,11 @@ impl ComicInfoApp {
             dialog_opened_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(1))
                 .unwrap_or_else(std::time::Instant::now),
+            last_dialog: None,
+            dialog_closing: false,
+            dialog_closed_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
             sep_preview: String::new(),
             status:      "Ready.".to_string(),
             verbose:     false,
@@ -223,6 +239,10 @@ impl ComicInfoApp {
             settings_open: false,
             settings_was_open: false,
             settings_opened_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
+            settings_closing: false,
+            settings_closed_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(1))
                 .unwrap_or_else(std::time::Instant::now),
             reorder_show_active_only: false,
@@ -1231,31 +1251,69 @@ impl ComicInfoApp {
     }
 
     // ── Dialogs ───────────────────────────────────────────────────────────────
+    // Fade-out design: a dialog's own click-handler logic (e.g. "if yes {
+    // self.reset_all() } else if !cancel { self.dialog = Some(...) }")
+    // is left completely untouched -- when a dialog decides to close, it
+    // simply stops re-setting self.dialog, exactly as before, leaving it
+    // None after this fn's `.take()`. What's new is what happens with
+    // that None: rather than the window vanishing that same frame, this
+    // function keeps rendering the LAST dialog it saw (self.last_dialog)
+    // for a further ~150ms with opacity ticking down to 0 via
+    // dialog_closing/dialog_closed_at, and only drops last_dialog for
+    // real once that timer completes.
+    //
+    // ui.disable() while disable_ui is true stops a fading dialog's
+    // buttons from reporting NEW clicks -- but it does NOT stop each
+    // arm's existing "nothing was clicked, stay open" fallback branch
+    // (the `else { self.dialog = Some(...) }` part) from firing on every
+    // one of those disabled fade-out frames, since "disabled" and
+    // "wasn't clicked" both just mean .clicked() == false to that
+    // branch. Left alone, that fallback re-sets self.dialog every single
+    // closing frame, which flips now_open back to true next frame and
+    // restarts the whole open/close cycle -- the dialog never actually
+    // closes, it just fades out partway and snaps back. Fix: after the
+    // match below runs (so the fade-out still renders and any in-
+    // progress per-dialog state is preserved for those frames), if this
+    // was a closing frame, self.dialog is forced back to None regardless
+    // of what the arm just wrote -- the close was already decided the
+    // frame dialog_closing became true, and nothing after that should
+    // be able to undo it.
     fn render_dialogs(&mut self, ctx: &egui::Context) {
-        let Some(dlg) = self.dialog.take() else {
-            self.dialog_was_open = false;
-            return;
-        };
-        // Fade this dialog's window in over ~150ms, same timer-based
-        // approach as the tab-content fade (see update()) rather than
-        // egui's animate_bool_with_time, for the same reason: reopening
-        // a dialog you'd already seen before in this session would
-        // otherwise show no animation, since that Id would already be
-        // "settled" at 1.0 from its last appearance. dialog_was_open
-        // tracks only the None-to-Some transition (not which specific
-        // Dialog variant), which is enough here since only one dialog
-        // is ever shown at a time.
-        if !self.dialog_was_open {
-            self.dialog_opened_at = std::time::Instant::now();
-        }
-        self.dialog_was_open = true;
         const DIALOG_FADE_SECS: f32 = 0.15;
-        let elapsed = self.dialog_opened_at.elapsed().as_secs_f32();
-        let raw = (elapsed / DIALOG_FADE_SECS).clamp(0.0, 1.0);
-        let dialog_opacity = 1.0 - (1.0 - raw).powi(3); // ease-out cubic
-        if raw < 1.0 {
-            ctx.request_repaint();
+        let now_open = self.dialog.is_some();
+
+        if now_open {
+            if !self.dialog_was_open {
+                self.dialog_opened_at = std::time::Instant::now();
+            }
+            self.dialog_was_open = true;
+            self.dialog_closing = false;
+            self.last_dialog = self.dialog.take();
+        } else if self.dialog_was_open {
+            // Was open last frame, None now: the exact frame it closed.
+            self.dialog_was_open = false;
+            self.dialog_closing = true;
+            self.dialog_closed_at = std::time::Instant::now();
+        } else if self.dialog_closing
+            && self.dialog_closed_at.elapsed().as_secs_f32() >= DIALOG_FADE_SECS
+        {
+            self.dialog_closing = false;
+            self.last_dialog = None;
         }
+
+        let Some(dlg) = self.last_dialog.clone() else { return };
+
+        let dialog_opacity = if self.dialog_closing {
+            let raw = (self.dialog_closed_at.elapsed().as_secs_f32() / DIALOG_FADE_SECS).clamp(0.0, 1.0);
+            ctx.request_repaint();
+            1.0 - (1.0 - (1.0 - raw).powi(3)) // fading 1 -> 0, mirrors the fade-in curve
+        } else {
+            let raw = (self.dialog_opened_at.elapsed().as_secs_f32() / DIALOG_FADE_SECS).clamp(0.0, 1.0);
+            if raw < 1.0 { ctx.request_repaint(); }
+            1.0 - (1.0 - raw).powi(3) // ease-out cubic, fading 0 -> 1
+        };
+        let disable_ui = self.dialog_closing;
+        let was_closing_this_frame = self.dialog_closing;
 
         match dlg {
             Dialog::EditRule(mut s) => {
@@ -1318,8 +1376,10 @@ impl ComicInfoApp {
                     .title_bar(false)
                     .resizable(true).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity))
                     .show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, rule_dialog_title);
                         if same_start_end_applicable {
                             // s.same_start_end is real, persistent state
@@ -1434,8 +1494,10 @@ impl ComicInfoApp {
                     .title_bar(false)
                     .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity))
                     .show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Decimal Chapter");
                         ui.label(RichText::new("Decimal Chapter Detected").color(theme::TWARN()).strong().size(13.0));
                         ui.separator();
@@ -1472,8 +1534,10 @@ impl ComicInfoApp {
                     .title_bar(false)
                     .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity))
                     .show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Previous Session Found");
                         ui.label(format!("{count} files already processed in a previous run."));
                         ui.add_space(8.0);
@@ -1506,8 +1570,10 @@ impl ComicInfoApp {
                     .title_bar(false)
                     .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity))
                     .show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Final Chapter Detected");
                         ui.label(RichText::new(format!("Chapter {finale_num} is the last chapter.")).strong());
                         ui.add_space(6.0);
@@ -1530,8 +1596,10 @@ impl ComicInfoApp {
             Dialog::Notice(msg) => {
                 let mut ok_clicked = false;
                 egui::Window::new("Notice").title_bar(false).resizable(false).collapsible(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity)).show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Notice");
                         ui.label(&msg); ui.add_space(8.0);
                         if ui.add(theme::btn_secondary("  OK  ")).clicked() { ok_clicked = true; }
@@ -1546,8 +1614,21 @@ impl ComicInfoApp {
                     .title_bar(false)
                     .resizable(true).collapsible(false)
                     .default_width(440.0)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0]).show(ctx, |ui| {
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity)).show(ctx, |ui| {
+                        // dialog_opacity/disable_ui were skipped here for a
+                        // while to isolate a reported "closes then
+                        // immediately reopens" bug that seemed specific to
+                        // this dialog. It wasn't specific to this dialog --
+                        // it was the same fade-out re-persist bug every
+                        // dialog had (see the comment at the top of
+                        // render_dialogs), just harder to notice elsewhere
+                        // since most other dialogs don't sit directly over
+                        // the "?" button that opens them. Now that the
+                        // real fix is in place, this can render like every
+                        // other dialog again.
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, &title);
                         egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
                             ui.label(RichText::new(&body).size(12.5));
@@ -1561,8 +1642,10 @@ impl ComicInfoApp {
             Dialog::ConfirmReset => {
                 let mut yes = false; let mut cancel = false;
                 egui::Window::new("Confirm Reset").title_bar(false).resizable(false).collapsible(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity)).show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Confirm Reset");
                         ui.label("Clear ALL settings, metadata, paths and rules?\nThis cannot be undone.");
                         ui.add_space(8.0);
@@ -1584,8 +1667,10 @@ impl ComicInfoApp {
                     RuleTarget::Summary => ("Summary Rules", self.cfg.summ_rules.len()),
                 };
                 egui::Window::new("Confirm Remove").title_bar(false).resizable(false).collapsible(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity)).show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Confirm Remove");
                         ui.label(format!(
                             "No rule is selected. Remove all {count} rule(s) in {name}?\nThis cannot be undone."
@@ -1611,8 +1696,10 @@ impl ComicInfoApp {
             Dialog::ConfirmClearLog => {
                 let mut yes = false; let mut cancel = false;
                 egui::Window::new("Clear Log").title_bar(false).resizable(false).collapsible(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0]).show(ctx, |ui| {
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity)).show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Clear Log");
                         ui.label("Clear the log output?\nThis only clears the displayed log, not the on-disk progress or error logs.");
                         ui.add_space(8.0);
@@ -1639,8 +1726,10 @@ impl ComicInfoApp {
                     .title_bar(false)
                     .resizable(false).collapsible(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity))
                     .show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Empty Metadata Fields");
                         ui.label(RichText::new(
                             "These fields are empty and will be blank in every generated file:"
@@ -1693,8 +1782,10 @@ impl ComicInfoApp {
                     .resizable(true).collapsible(false)
                     .min_width(320.0)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity))
                     .show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Add Metadata Tag");
                         ui.label(RichText::new("Choose a field to add:")
                             .color(theme::TDIM()).size(11.0));
@@ -1785,8 +1876,10 @@ impl ComicInfoApp {
                                 .resizable(true).collapsible(false)
                                 .min_width(300.0)
                                 .default_pos(egui::pos2(360.0, 120.0))
+                                .frame(theme::dialog_window_frame(dialog_opacity))
                                 .show(ctx, |ui| {
                                     ui.set_opacity(dialog_opacity);
+                                    if disable_ui { ui.disable(); }
                                     theme::window_titlebar(ui, "Tag Order");
                                     self.reorder_tags_contents(ui, &active, &mut reset, &mut set_default, &mut open);
                                 });
@@ -1825,8 +1918,10 @@ impl ComicInfoApp {
                     .collapsible(false)
                     .min_width(480.0)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity))
                     .show(ctx, |ui| {
                         ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
                         theme::window_titlebar(ui, "Import Successful");
                         // Header
                         ui.label(
@@ -1885,6 +1980,13 @@ impl ComicInfoApp {
                     self.dialog = Some(Dialog::ImportResult { filename, items });
                 }
             }
+        }
+
+        // See the comment at the top of this function: whatever the arm
+        // above just wrote into self.dialog doesn't get to count while
+        // we were fading out this frame -- the close already happened.
+        if was_closing_this_frame {
+            self.dialog = None;
         }
     }
 
@@ -1994,7 +2096,11 @@ impl ComicInfoApp {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(8.0);
-                if ui.add(theme::btn_secondary("Settings")).on_hover_text("App settings").clicked() {
+                let settings_closed_this_frame = self.settings_closing
+                    && self.settings_closed_at.elapsed().as_secs_f32() < 0.05;
+                if ui.add(theme::btn_secondary("Settings")).on_hover_text("App settings").clicked()
+                    && !settings_closed_this_frame
+                {
                     self.settings_open = true;
                 }
                 ui.add_space(10.0);
@@ -2070,30 +2176,59 @@ impl ComicInfoApp {
     // each toggle saves to disk immediately on change, no separate Save
     // button, since there's nothing here worth risking losing on a crash.
     fn show_settings_window(&mut self, ctx: &egui::Context) {
-        if !self.settings_open {
+        const SETTINGS_FADE_SECS: f32 = 0.15;
+
+        if !self.settings_open && !self.settings_closing {
             self.settings_was_open = false;
             return;
         }
-        if !self.settings_was_open {
+        if self.settings_open && !self.settings_was_open {
             self.settings_opened_at = std::time::Instant::now();
+            self.settings_closing = false;
         }
-        self.settings_was_open = true;
-        const SETTINGS_FADE_SECS: f32 = 0.15;
-        let elapsed = self.settings_opened_at.elapsed().as_secs_f32();
-        let raw = (elapsed / SETTINGS_FADE_SECS).clamp(0.0, 1.0);
-        let settings_opacity = 1.0 - (1.0 - raw).powi(3);
-        if raw < 1.0 {
-            ctx.request_repaint();
+        if self.settings_open {
+            self.settings_was_open = true;
         }
 
+        // If a previous frame's close button click started the closing
+        // fade, keep counting that down; once it completes, actually
+        // clear settings_was_open so a future re-open starts a fresh
+        // fade-in rather than reading stale state.
+        if self.settings_closing
+            && self.settings_closed_at.elapsed().as_secs_f32() >= SETTINGS_FADE_SECS
+        {
+            self.settings_closing = false;
+            self.settings_was_open = false;
+            self.settings_open = false;
+            return;
+        }
+
+        let settings_opacity = if self.settings_closing {
+            let raw = (self.settings_closed_at.elapsed().as_secs_f32() / SETTINGS_FADE_SECS).clamp(0.0, 1.0);
+            ctx.request_repaint();
+            1.0 - (1.0 - (1.0 - raw).powi(3))
+        } else {
+            let raw = (self.settings_opened_at.elapsed().as_secs_f32() / SETTINGS_FADE_SECS).clamp(0.0, 1.0);
+            if raw < 1.0 { ctx.request_repaint(); }
+            1.0 - (1.0 - raw).powi(3)
+        };
+        let disable_settings_ui = self.settings_closing;
+
+        // `open` starts true whenever we're still meant to be showing
+        // (either genuinely open, or mid-closing-fade) -- if the
+        // titlebar's close button flips it to false THIS frame, that's
+        // the signal to start the closing fade rather than vanishing
+        // immediately.
         let mut open = true;
         egui::Window::new("Settings")
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
-            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 48.0])
+            .anchor(egui::Align2::RIGHT_TOP, [-16.0, 64.0])
+            .frame(theme::dialog_window_frame(settings_opacity))
             .show(ctx, |ui| {
                 ui.set_opacity(settings_opacity);
+                if disable_settings_ui { ui.disable(); }
                 theme::window_titlebar_with_close(ui, "Settings", &mut open);
                 ui.set_min_width(280.0);
                 theme::section_hdr(ui, "Safety");
@@ -2175,7 +2310,19 @@ impl ComicInfoApp {
                     );
                 });
             });
-        self.settings_open = open;
+
+        if !open && !self.settings_closing {
+            // The close button was clicked this frame (while genuinely
+            // open, not already mid-fade-out) -- start the fade-out
+            // instead of closing immediately. self.settings_open stays
+            // true for now; the guard clause at the top of this fn
+            // keeps it rendering (non-interactively, fading) via
+            // settings_closing until that timer completes.
+            self.settings_closing = true;
+            self.settings_closed_at = std::time::Instant::now();
+        } else if open {
+            self.settings_open = true;
+        }
     }
 }
 

@@ -403,6 +403,38 @@ pub fn window_titlebar(ui: &mut egui::Ui, title: &str) {
     window_titlebar_impl(ui, title, None);
 }
 
+/// The box (fill/stroke/rounding) a themed dialog `egui::Window` sits in.
+/// Mirrors setup_style's window_fill/window_stroke/window_rounding
+/// exactly, so an `opacity` of 1.0 looks identical to the default egui
+/// Window frame every dialog already renders with.
+///
+/// Needed because `ui.set_opacity(..)` inside a Window's `.show(ctx, |ui|
+/// ...)` closure only fades the CONTENT that closure paints -- the
+/// Window's own outer frame (this box) is painted by the Window/Area
+/// machinery before the closure ever runs, from the ctx-wide opaque
+/// Visuals, and never sees that per-frame opacity at all. Left on the
+/// default frame, a "fading" dialog's text and buttons visibly fade out
+/// while its box stays fully solid the whole time and then just
+/// disappears outright the instant the fade timer completes -- text
+/// goes, then the box goes, as two separate, disjointed steps. Passing
+/// `dialog_window_frame(dialog_opacity)` to `.frame(...)` on the Window
+/// builder itself makes the box's own fill/stroke fade in lockstep with
+/// everything else, so the whole dialog fades as one thing.
+pub fn dialog_window_frame(opacity: f32) -> egui::Frame {
+    let a = |c: Color32| -> Color32 {
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (c.a() as f32 * opacity).round() as u8)
+    };
+    // inner_margin matches style.spacing.window_margin set below in
+    // setup_style (16.0 on all sides) -- NOT egui's unthemed built-in
+    // Window default, which this app never actually renders with.
+    egui::Frame::none()
+        .fill(a(SURF2()))
+        .stroke(Stroke::new(1.0_f32, a(BDR())))
+        .rounding(Rounding::same(10.0))
+        .shadow(Shadow::NONE)
+        .inner_margin(Margin::same(16.0))
+}
+
 /// Same as `window_titlebar`, but paints a themed "x" close button on the
 /// right that sets `*open = false` when clicked -- for the one window
 /// (Settings) that previously used egui's built-in `.open(&mut bool)`.
