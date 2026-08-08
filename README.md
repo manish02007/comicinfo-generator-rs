@@ -1,9 +1,10 @@
 # ComicInfo Generator — Rust Edition
 
-A fast, modern GUI application for generating and embedding `ComicInfo.xml`
-metadata into CBZ comic archive files. Full port of the Python/tkinter version
-to Rust + egui, with every original feature preserved and a fair amount built
-on top since.
+ComicInfo Generator embeds `ComicInfo.xml` metadata into `.cbz` comic and
+manga archives — batch renaming, volume/chapter/date/summary tagging, and
+metadata rules, all from a native desktop app. Full port of the original
+Python/tkinter version to Rust + egui, with every original feature
+preserved and a fair amount built on top since.
 
 ---
 
@@ -34,11 +35,11 @@ on top since.
 
 **Paths tab** — point at your CBZ folder and optional JSON files:
 
-![Paths tab](assets/screenshots/paths-tab.png)
+![ComicInfo Generator Paths tab showing CBZ folder and JSON metadata file selection](assets/screenshots/paths-tab.png)
 
 **Run tab** — live log and stats as a batch completes:
 
-![Run tab](assets/screenshots/run-tab.png)
+![ComicInfo Generator Run tab showing live batch progress log while embedding ComicInfo.xml metadata into CBZ files](assets/screenshots/run-tab.png)
 
 ---
 
