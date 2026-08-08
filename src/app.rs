@@ -846,7 +846,7 @@ impl ComicInfoApp {
                     pfx = match detect_file_type(s) {
                         "volume" => "Volume", "chapter" => "Chapter", _ => "Episode"
                     }.to_string();
-                    if let Some(m) = regex::Regex::new(r"\d+(?:\.\d+)?").unwrap().find(s) {
+                    if let Some(m) = re_anynum().find(s) {
                         num = m.as_str().to_string();
                     }
                 }
@@ -1228,7 +1228,7 @@ impl ComicInfoApp {
         let mut nums: Vec<(f64, usize, String)> = Vec::new();
         for (i, p) in cbzs.iter().enumerate() {
             let n = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-            if let Some(m) = regex::Regex::new(r"\d+(?:\.\d+)?").unwrap().find(&n) {
+            if let Some(m) = re_anynum().find(&n) {
                 let s = m.as_str().to_string();
                 if let Ok(f) = s.parse::<f64>() { nums.push((f, i, s)); }
             }
@@ -2416,7 +2416,7 @@ impl ComicInfoApp {
                 let resp = ui.add(
                     egui::TextEdit::singleline(val)
                         .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
-                        .hint_text("Browse or type a path...")
+                        .hint_text(RichText::new("Browse or type a path...").color(theme::TMUT()))
                         .desired_width(f32::INFINITY)
                 ).on_hover_text(tip);
                 if resp.changed() && val.starts_with('"') && val.ends_with('"') && val.len() > 2 {
@@ -2918,7 +2918,7 @@ impl ComicInfoApp {
                                 ui.add(
                                     egui::TextEdit::singleline(&mut self.cfg.output_path)
                                         .font(egui::FontId::new(12.0, egui::FontFamily::Monospace))
-                                        .hint_text("Browse or type a folder path...")
+                                        .hint_text(RichText::new("Browse or type a folder path...").color(theme::TMUT()))
                                         .desired_width(f32::INFINITY)
                                 ).on_hover_text("New CBZ files are written here instead of the source folder.");
                             });
