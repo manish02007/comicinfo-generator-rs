@@ -1,8 +1,24 @@
 use crate::{processing::*, state::*, theme, worker::{UiMsg, WorkerConfig, WorkerMsg}};
 use eframe::egui::{self, Color32, RichText};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{atomic::AtomicBool, mpsc, Arc};
+
+// ── Single File Mode: ComicInfo tags this app understands beyond the
+// generic COMICINFO_FIELDS registry -- Title/Number/Volume/Summary are
+// deliberately excluded from that registry (see processing.rs) because
+// batch mode derives them from filenames/rules rather than free-typing
+// them, but Single File Mode has no filename-parsing pipeline to derive
+// them from, so all four need to be ordinary editable tags here. Series is
+// NOT listed -- it's already a normal COMICINFO_FIELDS entry.
+const SFM_EXTRA_KNOWN_TAGS: &[&str] = &["Title", "Number", "Volume", "Summary"];
+
+// Shared reserved buffer subtracted from available_height() before handing
+// it to a ScrollArea as an explicit max_height, in both sfm_file_tree and
+// sfm_editor_editing_ui -- see either call site's comment for why this
+// needs to be one shared constant rather than each panel picking its own
+// value.
+const SFM_SCROLL_BOTTOM_GAP: f32 = 14.0;
 
 // ── Autosave ──────────────────────────────────────────────────────────────────
 fn autosave_path() -> PathBuf {
@@ -86,6 +102,142 @@ pub struct DecimalState {
     pub custom:    String,
 }
 
+// ── Single File Mode ──────────────────────────────────────────────────────────
+/// One entry in the left-side file tree.
+#[derive(Debug, Clone)]
+pub struct SfmFileEntry {
+    pub path:    PathBuf,
+    pub name:    String,
+    pub is_cbz:  bool,
+}
+
+/// A single tag row in the ComicInfo.xml editor, in on-screen order.
+/// Foreign (unrecognized) tags carry the same shape as known ones --
+/// field_spec(&tag) returning None at render time is what flags a row as
+/// foreign, rather than a separate variant/flag duplicated here, so a tag
+/// can never disagree with the registry about whether it's known.
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct SfmTagRow {
+    pub tag:   String,
+    pub value: String,
+    // Stable identity for egui_dnd's drag-and-drop reordering, independent
+    // of `tag`/`value` -- matches the existing Tag Order dialog's own
+    // pattern of giving egui_dnd something that doesn't change identity
+    // just because the user edited a field's text.
+    pub id:    u64,
+}
+
+/// What the right-hand panel is currently showing for the selected file.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum SfmPanelState {
+    /// Nothing selected yet (no file opened, or folder opened but empty).
+    #[default]
+    Empty,
+    /// Selected file has no ComicInfo.xml -- offering to create one.
+    NoComicInfo,
+    /// Selected file's ComicInfo.xml is loaded and being edited.
+    Editing,
+    /// The archive itself couldn't be read (corrupt zip, not a real CBZ).
+    LoadError(String),
+}
+
+/// Where a pending file-switch (or mode-exit) in Single File Mode is headed,
+/// once the user resolves any unsaved-changes prompt. A plain
+/// Option<usize> can't distinguish "no navigation pending" from "pending
+/// navigation is to leave the mode" (index None is a valid destination in
+/// its own right, not the same as no destination at all).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SfmNavTarget {
+    File(usize),
+    ExitMode,
+}
+
+/// One undo/redo step: the full tag list for `file` immediately before
+/// the change this entry represents. Whole-list snapshots rather than a
+/// diff -- at word-level granularity (see SfmState::pending_undo_word)
+/// the history is short enough that snapshot cost is a non-issue, and
+/// snapshots can never drift out of sync with reality the way a
+/// hand-rolled diff/patch representation could if a future edit here
+/// missed a case (add/remove/reorder all naturally fall out of "the
+/// whole list looked like this" with no extra bookkeeping).
+#[derive(Debug, Clone)]
+pub struct SfmUndoEntry {
+    pub file:   PathBuf,
+    pub before: Vec<SfmTagRow>,
+    pub after:  Vec<SfmTagRow>,
+}
+
+/// All Single File Mode state, held on ComicInfoApp only while
+/// settings.single_file_mode is true. Kept as one sub-struct rather than
+/// flattened onto ComicInfoApp directly so it's obvious at a glance which
+/// fields belong to this mode versus the batch-processing tabs, and so
+/// resetting/clearing it on mode-exit is one assignment instead of
+/// resetting a dozen scattered fields individually.
+#[derive(Debug, Clone, Default)]
+pub struct SfmState {
+    // The single file or folder the user opened. Some(dir) for a folder
+    // (even a folder containing exactly one file) vs Some(file) with no
+    // sibling entries for a directly-opened single file -- root itself
+    // isn't shown in the tree, only `files` is.
+    pub root:            Option<PathBuf>,
+    pub files:            Vec<SfmFileEntry>,
+    pub selected:          Option<usize>,
+    pub panel:              SfmPanelState,
+    // The tags currently shown/edited in the right panel.
+    pub tags:                 Vec<SfmTagRow>,
+    // Snapshot of `tags` exactly as loaded (or as last saved), for dirty-
+    // checking and for Discard to revert to. Not kept in sync on every
+    // keystroke -- only refreshed on load and on successful save.
+    pub loaded_tags:            Vec<SfmTagRow>,
+    // Foreign tags detected on the currently-loaded file (field_spec(tag)
+    // == None), surfaced to the user once per load rather than silently.
+    pub foreign_tags_notice:      Option<Vec<String>>,
+    // Monotonic counter for SfmTagRow::id -- see its doc comment.
+    pub next_row_id:                u64,
+    // The navigation the user requested while the current selection had
+    // unsaved changes -- holds the pending target while the
+    // Save/Discard/Cancel prompt (Dialog::SfmUnsavedChanges) is showing.
+    pub pending_nav:                   Option<SfmNavTarget>,
+    // Snapshot of the WHOLE tag list taken just before the word currently
+    // being typed started, held until the word finishes (a boundary
+    // character is typed, or the field loses focus) and gets pushed to
+    // the undo stack as one step -- see sfm_editor_editing_ui's per-row
+    // rendering. None means no word is currently in progress anywhere in
+    // this file's editor. Dropped without committing on file switch,
+    // same as everything else in-progress on the old file (a half-typed
+    // word doesn't need its own undo step once you've navigated away
+    // from it -- the file-switch save/discard prompt already covers
+    // whether that edit is kept at all).
+    pub pending_undo_word:               Option<Vec<SfmTagRow>>,
+    // Snapshot to apply once a pending navigation (see pending_nav)
+    // resolves -- set when Ctrl+Z/Y needs to jump to a different file
+    // that also requires the Save/Discard/Cancel prompt first (auto-
+    // save-on-focus-change is off and the current file has unsaved
+    // changes). The file switch itself happens via the normal
+    // pending_nav machinery; this is only the extra "and then also apply
+    // this undo/redo step" instruction layered on top of it. None in
+    // every other case -- undo/redo targeting the already-open file, or
+    // a different file that didn't need the prompt, apply immediately
+    // with no deferral.
+    pub pending_undo_apply:              Option<Vec<SfmTagRow>>,
+    // Whether the "Add Tag" floating menu (a plain egui::Window, not a
+    // real egui::ComboBox -- this app's pinned egui 0.29 predates
+    // ComboBox::close_behavior/the Popup rewrite that would let a
+    // combobox stay open after a selection, so a small manually-
+    // positioned window is used instead) is currently showing. Stays
+    // true across multiple tag picks in a row (each pick just pushes a
+    // row, it doesn't touch this flag) and is only set false by an
+    // explicit click outside the menu's own rect.
+    pub add_tag_menu_open:                bool,
+}
+
+impl SfmState {
+    pub fn dirty(&self) -> bool {
+        self.tags.iter().map(|r| (&r.tag, &r.value)).collect::<Vec<_>>()
+            != self.loaded_tags.iter().map(|r| (&r.tag, &r.value)).collect::<Vec<_>>()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Dialog {
     EditRule(RuleEditState),
@@ -110,10 +262,16 @@ pub enum Dialog {
     ImportResult { filename: String, items: Vec<(String, String)> },
     /// Detailed explanation for a tab or card's "?" help button.
     HelpText { title: String, body: String },
+    /// Single File Mode: switching to a different file, or leaving the
+    /// mode entirely, while the currently-selected file has unsaved tag
+    /// edits. The actual destination lives in SfmState::pending_nav
+    /// (set before this dialog opens) rather than duplicated here.
+    SfmUnsavedChanges,
 }
 
 #[derive(Debug, Clone)]
-pub enum PathPick { Folder, TitlesJson, DateJson, LoadConfig, SaveConfig(String), ImportMeta, OutputPath }
+pub enum PathPick { Folder, TitlesJson, DateJson, LoadConfig, SaveConfig(String), ImportMeta, OutputPath,
+    SfmFile, SfmFolder }
 
 #[derive(Default, Clone)]
 pub struct DisplayStats {
@@ -136,6 +294,17 @@ pub struct ComicInfoApp {
     // for the theme cross-fade's Transition struct.
     pub prev_tab: Tab,
     pub tab_switched_at: std::time::Instant,
+    // Same pattern, one level up: fades in whichever mode (Single File
+    // Mode vs batch tabs) just became active, on the frame
+    // settings.single_file_mode actually changes. Only the freshly-
+    // active mode's own content fades in -- there's no attempt to
+    // cross-fade the outgoing mode out at the same time, since the two
+    // are structurally different layouts (Single File Mode adds a
+    // SidePanel batch mode doesn't have at all), and briefly rendering
+    // both together to cross-fade risks real layout/overlap glitches
+    // that a simple fade-in for the incoming side avoids entirely.
+    pub prev_single_file_mode: bool,
+    pub mode_switched_at: std::time::Instant,
     // Whether self.dialog was Some(_) last frame, and when it most
     // recently transitioned from None to Some -- drives the same
     // fade-in treatment as tabs for popup/dialog windows (Notice,
@@ -168,6 +337,15 @@ pub struct ComicInfoApp {
     pub settings_opened_at: std::time::Instant,
     pub settings_closing: bool,
     pub settings_closed_at: std::time::Instant,
+    // The Settings toolbar button's own on-screen rect, recorded every
+    // frame show_toolbar renders it. show_settings_window reads this to
+    // exclude the button itself from its click-outside-closes check --
+    // same reasoning as the Add Tag menu's own click-outside handling:
+    // without excluding the button, the very click that just opened
+    // Settings would also register as "outside the window" (since the
+    // window doesn't exist yet on the frame the button is clicked) and
+    // immediately start closing it again.
+    pub settings_btn_rect: egui::Rect,
     // Tag Order dialog's "show only active tags" filter -- a view
     // preference for that dialog, not config data, so it lives here rather
     // than in AppConfig (doesn't get saved/loaded with a job config).
@@ -211,6 +389,21 @@ pub struct ComicInfoApp {
     pub pending_start: Option<(Vec<std::path::PathBuf>, std::collections::HashSet<String>, bool)>,
     // Autosave
     pub last_save:  std::time::Instant,
+    // Single File Mode's file tree + editor state. Only meaningfully
+    // populated while settings.single_file_mode is true; left at its
+    // Default when the mode isn't active rather than allocated lazily, so
+    // toggling the mode never needs a None-vs-Some(default) distinction.
+    pub sfm: SfmState,
+    // Single File Mode undo/redo, shared across every file (not reset on
+    // file switch or re-entering the mode -- lives on ComicInfoApp
+    // directly rather than inside SfmState, which DOES get reset on
+    // switch/exit, precisely so history survives both). `undo_cursor` is
+    // the index of the next entry Ctrl+Z would apply (one past the most
+    // recent applied undo, so Ctrl+Y re-applies it); a fresh edit made
+    // after undoing truncates everything from undo_cursor onward, same
+    // as any standard undo/redo stack.
+    pub sfm_undo_stack:  Vec<SfmUndoEntry>,
+    pub sfm_undo_cursor: usize,
 }
 
 impl ComicInfoApp {
@@ -221,6 +414,10 @@ impl ComicInfoApp {
             tab:         Tab::default(),
             prev_tab:    Tab::default(),
             tab_switched_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap_or_else(std::time::Instant::now),
+            prev_single_file_mode: false,
+            mode_switched_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(1))
                 .unwrap_or_else(std::time::Instant::now),
             dialog_was_open: false,
@@ -245,6 +442,7 @@ impl ComicInfoApp {
             settings_closed_at: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(1))
                 .unwrap_or_else(std::time::Instant::now),
+            settings_btn_rect: egui::Rect::ZERO, // corrected next frame once show_toolbar renders it
             reorder_show_active_only: false,
             reorder_button_row_h: 44.0, // generous first-frame guess; corrected next frame
             vol_sel:     None, date_sel: None, summ_sel: None, meta_field_sel: None,
@@ -260,9 +458,13 @@ impl ComicInfoApp {
             log_footer:  Vec::new(),
             pending_start: None,
             last_save:   std::time::Instant::now(),
+            sfm: SfmState::default(),
+            sfm_undo_stack: Vec::new(),
+            sfm_undo_cursor: 0,
         };
         app.load_autosave();
         app.load_settings();
+        app.sfm_restore_last_session();
         // Apply the saved theme choice now, instantly (no cross-fade --
         // that's reserved for user-triggered switches after startup, not
         // the app's first frame). theme::set_theme always animates, so
@@ -897,6 +1099,9 @@ impl ComicInfoApp {
                     rfd::FileDialog::new().add_filter("JSON", &["json"]).pick_file(),
                 PathPick::SaveConfig(name) =>
                     rfd::FileDialog::new().add_filter("JSON", &["json"]).set_file_name(name).save_file(),
+                PathPick::SfmFile =>
+                    rfd::FileDialog::new().add_filter("CBZ Comic Archive", &["cbz"]).pick_file(),
+                PathPick::SfmFolder => rfd::FileDialog::new().pick_folder(),
             };
             let _ = tx.send(res);
         });
@@ -925,6 +1130,295 @@ impl ComicInfoApp {
             }
             Some(PathPick::ImportMeta) => self.import_meta(&path),
             Some(PathPick::OutputPath) => self.cfg.output_path = path.to_string_lossy().into(),
+            Some(PathPick::SfmFile)   => self.sfm_open_path(path, false),
+            Some(PathPick::SfmFolder) => self.sfm_open_path(path, true),
+            None => {}
+        }
+    }
+
+    // ── Single File Mode ──────────────────────────────────────────────────────
+    // Opens a single file or a folder into the SFM file tree. For a single
+    // file, the tree shows just that one entry (still routed through the
+    // same list-and-select machinery as a folder, rather than a separate
+    // one-file code path, so selection/loading/saving behave identically
+    // either way). For a folder, every direct child file is listed (not
+    // just .cbz -- see SfmFileEntry::is_cbz) and non-.cbz entries are
+    // rendered greyed out and unselectable rather than filtered out
+    // entirely, so the user can see everything that's actually there.
+    fn sfm_open_path(&mut self, path: PathBuf, is_folder: bool) {
+        self.sfm = SfmState::default();
+        self.sfm.root = Some(path.clone());
+
+        let mut entries: Vec<SfmFileEntry> = if is_folder {
+            std::fs::read_dir(&path)
+                .map(|rd| rd.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.is_file())
+                    .map(|p| {
+                        let name = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                        let is_cbz = p.extension().map_or(false, |x| x.eq_ignore_ascii_case("cbz"));
+                        SfmFileEntry { path: p, name, is_cbz }
+                    })
+                    .collect())
+                .unwrap_or_default()
+        } else {
+            let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+            let is_cbz = path.extension().map_or(false, |x| x.eq_ignore_ascii_case("cbz"));
+            vec![SfmFileEntry { path: path.clone(), name, is_cbz }]
+        };
+        entries.sort_by(|a, b| natural_sort_key(&a.name).cmp(&natural_sort_key(&b.name)));
+        self.sfm.files = entries;
+
+        // Auto-select the first .cbz entry, if any, so opening a folder
+        // drops the user straight into the editor instead of an empty
+        // right panel they then have to click into themselves.
+        let first_cbz = self.sfm.files.iter().position(|f| f.is_cbz);
+        if let Some(idx) = first_cbz {
+            self.sfm.selected = Some(idx);
+            self.sfm_load_selected();
+        }
+
+        // Remember this as the session to restore next time Single File
+        // Mode is entered/the app is relaunched -- see
+        // sfm_restore_last_session. Persisted here (the one place a new
+        // root gets opened) rather than duplicated at every call site.
+        self.settings.sfm_last_root = Some(path);
+        self.settings.sfm_last_is_folder = is_folder;
+        self.sfm_persist_selection();
+    }
+
+    /// Re-opens whatever file/folder was open in Single File Mode last
+    /// time (persisted via sfm_open_path/sfm_request_select/
+    /// sfm_resolve_pending_nav), so leaving the mode or quitting the app
+    /// entirely doesn't drop the user back to an empty file tree. Called
+    /// once at startup, after load_settings -- restoring here rather than
+    /// lazily on first mode-entry means the file tree is already correct
+    /// the instant the user flips the Settings toggle on, no visible pop.
+    fn sfm_restore_last_session(&mut self) {
+        let Some(root) = self.settings.sfm_last_root.clone() else { return };
+        if !root.exists() {
+            // Show once, then clear the stale remembered path so this
+            // notice doesn't keep reappearing on every future launch.
+            self.dialog = Some(Dialog::Notice(format!(
+                "The Single File Mode item you had open last time is no \
+                 longer there:\n{}", root.display()
+            )));
+            self.settings.sfm_last_root = None;
+            self.settings.sfm_last_selected = None;
+            self.save_settings();
+            return;
+        }
+
+        let is_folder = self.settings.sfm_last_is_folder;
+        self.sfm_open_path(root, is_folder);
+
+        // sfm_open_path already auto-selected the first .cbz entry (and
+        // re-saved settings using that as sfm_last_selected) -- if a
+        // different file was actually selected last time, switch to it
+        // now instead. A missing/renamed remembered file just leaves the
+        // auto-selected first entry in place rather than erroring, since
+        // the folder itself did resolve fine.
+        if let Some(want) = self.settings.sfm_last_selected.clone() {
+            if let Some(idx) = self.sfm.files.iter().position(|f| f.path == want) {
+                if Some(idx) != self.sfm.selected {
+                    self.sfm.selected = Some(idx);
+                    self.sfm_load_selected();
+                    self.sfm_persist_selection();
+                }
+            }
+        }
+    }
+
+    /// Requests a switch to `idx` in the file tree. Goes through the
+    /// unsaved-changes guard: if the currently-loaded file has edits that
+    /// haven't been saved, this opens the confirmation dialog instead of
+    /// switching immediately, and the actual switch happens once that
+    /// dialog resolves (see render_dialogs' Dialog::SfmUnsavedChanges arm).
+    fn sfm_request_select(&mut self, idx: usize) {
+        if Some(idx) == self.sfm.selected { return; }
+        if self.sfm.dirty() {
+            if self.settings.sfm_autosave_on_focus_change {
+                self.sfm_save_current();
+                self.sfm_switch_to(idx);
+            } else {
+                self.sfm.pending_nav = Some(SfmNavTarget::File(idx));
+                // A plain click is never an undo/redo action -- clear any
+                // stale pending_undo_apply left over from an earlier
+                // cancelled Ctrl+Z/Y attempt, so THIS navigation's Save/
+                // Discard doesn't incorrectly re-apply that old step.
+                self.sfm.pending_undo_apply = None;
+                self.dialog = Some(Dialog::SfmUnsavedChanges);
+            }
+        } else {
+            self.sfm_switch_to(idx);
+        }
+    }
+
+    /// Actually performs a selection change: sets `selected`, loads the
+    /// new file's tags, and persists it as the file to restore next
+    /// session. Assumes any unsaved-changes handling (prompt, or
+    /// auto-save) for whatever was previously selected has already
+    /// happened -- this is the "just do it" step every switch path
+    /// (direct click when clean, auto-save-then-switch, Save/Discard
+    /// resolving the prompt, undo/redo jumping files) funnels through.
+    fn sfm_switch_to(&mut self, idx: usize) {
+        self.sfm.selected = Some(idx);
+        self.sfm_load_selected();
+        self.sfm_persist_selection();
+    }
+
+    /// Saves whichever file is currently self.sfm.selected as the one to
+    /// restore next time (see sfm_restore_last_session). Small and called
+    /// from every place selected actually changes, rather than
+    /// duplicating the same three-field settings update at each of those
+    /// call sites.
+    fn sfm_persist_selection(&mut self) {
+        self.settings.sfm_last_selected = self.sfm.selected
+            .and_then(|i| self.sfm.files.get(i))
+            .map(|f| f.path.clone());
+        self.save_settings();
+    }
+
+    /// Loads (or re-loads) ComicInfo.xml for whichever file is currently
+    /// self.sfm.selected, populating the right panel. Called after a
+    /// selection change, and after a successful Save (to re-derive
+    /// loaded_tags from what's now actually on disk rather than trusting
+    /// the in-memory tags are byte-identical to what got written).
+    fn sfm_load_selected(&mut self) {
+        self.sfm.foreign_tags_notice = None;
+        self.sfm.tags.clear();
+        self.sfm.loaded_tags.clear();
+
+        let Some(idx) = self.sfm.selected else { self.sfm.panel = SfmPanelState::Empty; return };
+        let Some(entry) = self.sfm.files.get(idx) else { self.sfm.panel = SfmPanelState::Empty; return };
+        if !entry.is_cbz {
+            // Shouldn't normally be reachable (non-.cbz rows are
+            // unselectable in the UI), but if selected is somehow left
+            // pointing at one -- e.g. after a folder re-scan reorders
+            // entries -- fail safe into Empty rather than trying to read
+            // a file that was never a real archive.
+            self.sfm.panel = SfmPanelState::Empty;
+            return;
+        }
+
+        match read_comic_info_from_cbz(&entry.path) {
+            Ok(ComicInfoReadResult::Missing) => {
+                self.sfm.panel = SfmPanelState::NoComicInfo;
+            }
+            Ok(ComicInfoReadResult::Found(pairs)) => {
+                let foreign: Vec<String> = pairs.iter()
+                    .map(|(t, _)| t.clone())
+                    .filter(|t| field_spec(t).is_none() && !SFM_EXTRA_KNOWN_TAGS.contains(&t.as_str()))
+                    .collect();
+                let rows: Vec<SfmTagRow> = pairs.into_iter().map(|(tag, value)| {
+                    let id = self.sfm.next_row_id;
+                    self.sfm.next_row_id += 1;
+                    SfmTagRow { tag, value, id }
+                }).collect();
+                self.sfm.tags = rows.clone();
+                self.sfm.loaded_tags = rows;
+                self.sfm.foreign_tags_notice = if foreign.is_empty() { None } else { Some(foreign) };
+                self.sfm.panel = SfmPanelState::Editing;
+            }
+            Err(e) => {
+                self.sfm.panel = SfmPanelState::LoadError(e.to_string());
+            }
+        }
+    }
+
+    /// Creates a fresh ComicInfo.xml for the selected file with just the
+    /// two defaults specified for this feature (Title = filename without
+    /// extension, Series = containing folder's name) and switches
+    /// straight into the editor with those two rows pre-populated. Does
+    /// NOT write anything to disk yet -- same as loading an existing file,
+    /// this only takes effect once the user hits Save, so a user who opens
+    /// "Add ComicInfo.xml" and then navigates away without saving loses
+    /// nothing and the file is untouched.
+    fn sfm_create_default(&mut self) {
+        let Some(idx) = self.sfm.selected else { return };
+        let Some(entry) = self.sfm.files.get(idx).cloned() else { return };
+
+        let title = entry.path.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+        let series = entry.path.parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        let mut rows = Vec::new();
+        for (tag, value) in [("Title", title), ("Series", series)] {
+            let id = self.sfm.next_row_id;
+            self.sfm.next_row_id += 1;
+            rows.push(SfmTagRow { tag: tag.to_string(), value, id });
+        }
+        self.sfm.tags = rows;
+        // loaded_tags stays empty (not a clone of tags) so dirty() reads
+        // true immediately -- this is genuinely unsaved new content, not
+        // a no-op edit, and should prompt like any other unsaved change
+        // if the user tries to navigate away without saving.
+        self.sfm.loaded_tags = Vec::new();
+        self.sfm.foreign_tags_notice = None;
+        self.sfm.panel = SfmPanelState::Editing;
+    }
+
+    /// Writes the current editor's tags to the selected file's
+    /// ComicInfo.xml, in place, reusing the exact same
+    /// build_comic_info_xml + write_comic_info_xml_to path the batch
+    /// pipeline uses -- Single File Mode never needs its own writer.
+    fn sfm_save_current(&mut self) {
+        let Some(idx) = self.sfm.selected else { return };
+        let Some(entry) = self.sfm.files.get(idx).cloned() else { return };
+
+        let data: HashMap<String, String> = self.sfm.tags.iter()
+            .map(|r| (r.tag.clone(), r.value.clone())).collect();
+        // Order rows by their current on-screen position (post drag-
+        // reorder), not canonical/registry order -- build_comic_info_xml
+        // sorts by tag_rank against this list, so handing it the tags in
+        // exactly their current UI order makes the written XML match
+        // what's shown on screen.
+        let order: Vec<String> = self.sfm.tags.iter().map(|r| r.tag.clone()).collect();
+        let xml = build_comic_info_xml(&data, &order);
+
+        match write_comic_info_to_cbz(&entry.path, &xml) {
+            Ok(()) => {
+                self.sfm.loaded_tags = self.sfm.tags.clone();
+                self.status = format!("Saved ComicInfo.xml in {}", entry.name);
+            }
+            Err(e) => {
+                self.dialog = Some(Dialog::Notice(format!("Couldn't save {}: {e}", entry.name)));
+            }
+        }
+    }
+
+    /// Carries out whatever navigation was waiting on the unsaved-changes
+    /// prompt (see Dialog::SfmUnsavedChanges), once the user has resolved
+    /// it via Save or Discard. Not called for Cancel -- see that arm's
+    /// comment for why pending_nav is deliberately left set in that case.
+    fn sfm_resolve_pending_nav(&mut self) {
+        match self.sfm.pending_nav.take() {
+            Some(SfmNavTarget::File(idx)) => {
+                self.sfm_switch_to(idx);
+                // If this navigation was actually undo/redo jumping to a
+                // different file (deferred past the Save/Discard/Cancel
+                // prompt -- see sfm_goto_undo_entry), apply that step's
+                // target tags now that the switch itself is done.
+                if let Some(tags) = self.sfm.pending_undo_apply.take() {
+                    self.sfm_apply_undo_tags(tags);
+                }
+            }
+            Some(SfmNavTarget::ExitMode) => {
+                self.settings.single_file_mode = false;
+                self.save_settings();
+                // Deliberately NOT reset to SfmState::default() here --
+                // see the Settings toggle's identical comment on why:
+                // this lets toggling back into Single File Mode later in
+                // the same session restore the same file tree/selection
+                // instead of an empty one. The dirty tag edits that
+                // triggered this whole prompt are already gone either
+                // way (Save wrote them to disk and refreshed
+                // loaded_tags; Discard is handled by simply never having
+                // written them) -- what's kept here is just which
+                // root/file was open, not any unsaved content.
+            }
             None => {}
         }
     }
@@ -1980,6 +2474,56 @@ impl ComicInfoApp {
                     self.dialog = Some(Dialog::ImportResult { filename, items });
                 }
             }
+
+            Dialog::SfmUnsavedChanges => {
+                let mut save = false; let mut discard = false; let mut cancel = false;
+                let filename = self.sfm.selected
+                    .and_then(|i| self.sfm.files.get(i))
+                    .map(|f| f.name.clone())
+                    .unwrap_or_default();
+                egui::Window::new("Unsaved Changes").title_bar(false).resizable(false).collapsible(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0,0.0])
+                    .frame(theme::dialog_window_frame(dialog_opacity)).show(ctx, |ui| {
+                        ui.set_opacity(dialog_opacity);
+                        if disable_ui { ui.disable(); }
+                        theme::window_titlebar(ui, "Unsaved Changes");
+                        ui.label(format!("{filename} has unsaved ComicInfo.xml changes."));
+                        ui.add_space(8.0);
+                        ui.horizontal(|ui| {
+                            if ui.add(theme::btn_primary("  Save  ")).clicked() { save = true; }
+                            ui.add_space(4.0);
+                            if ui.add(theme::btn_secondary("  Discard  ")).clicked() { discard = true; }
+                            ui.add_space(4.0);
+                            if ui.add(theme::btn_secondary("  Cancel  ")).clicked() { cancel = true; }
+                        });
+                    });
+                // Cancel leaves pending_nav set on purpose -- Cancel means
+                // "stay here for now," not "forget I tried to navigate."
+                // A subsequent click on the same target (or another one)
+                // just re-opens this same prompt via sfm_request_select,
+                // same as if the first attempt never happened.
+                if save {
+                    self.sfm_save_current();
+                    self.sfm_resolve_pending_nav();
+                } else if discard {
+                    // Revert just the unsaved edit (tags back to
+                    // loaded_tags, whatever was last actually on disk) --
+                    // NOT a full self.sfm reset. Needed now that neither
+                    // sfm_resolve_pending_nav's ExitMode arm nor the
+                    // Settings toggle wipe self.sfm to a blank default on
+                    // mode-exit anymore (kept intact instead, so toggling
+                    // back into Single File Mode later in the session
+                    // restores the same file tree/selection) -- without
+                    // this explicit revert, "Discard" would do nothing
+                    // to the actual dirty tags at all, and they'd still
+                    // be sitting there dirty after leaving the mode.
+                    self.sfm.tags = self.sfm.loaded_tags.clone();
+                    self.sfm.pending_undo_word = None;
+                    self.sfm_resolve_pending_nav();
+                } else if !cancel {
+                    self.dialog = Some(Dialog::SfmUnsavedChanges);
+                }
+            }
         }
 
         // See the comment at the top of this function: whatever the arm
@@ -1992,6 +2536,39 @@ impl ComicInfoApp {
 
     // ── Keyboard shortcuts ────────────────────────────────────────────────────
     pub fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        // Single File Mode gets its own, unrelated set of shortcuts
+        // (Ctrl+S saves the currently-edited file, Ctrl+Z/Y undo/redo
+        // tag edits) rather than sharing any of the batch-mode ones
+        // below, which all act on self.cfg -- a job config SFM has no
+        // connection to. Most important for Ctrl+S specifically: a user
+        // editing tags in SFM pressing Ctrl+S out of habit should save
+        // their tag edits, not pop a "Save Config" file dialog for a job
+        // they're not even looking at.
+        if self.settings.single_file_mode {
+            ctx.input_mut(|i| {
+                if i.consume_key(egui::Modifiers::CTRL, egui::Key::S) {
+                    if self.sfm.dirty() { self.sfm_save_current(); }
+                }
+                if i.consume_key(egui::Modifiers::CTRL, egui::Key::Z) { self.sfm_undo(); }
+                // Ctrl+Shift+Z is the correct redo binding on every
+                // platform: it's macOS's actual standard (Cmd+Shift+Z --
+                // and per egui's own docs, Modifiers::CTRL already means
+                // "Ctrl on Win/Linux, Cmd on Mac" at the input-reporting
+                // level, so this one binding covers both automatically,
+                // no separate mac_cmd check needed), and it's also a
+                // widely-supported secondary on Windows/Linux apps.
+                // Ctrl+Y is kept alongside it as the more common primary
+                // on Windows/Linux specifically (Y is not any part of
+                // Mac's redo convention, so this is purely an addition,
+                // never a conflict with the line above).
+                if i.consume_key(egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT), egui::Key::Z)
+                    || i.consume_key(egui::Modifiers::CTRL, egui::Key::Y)
+                {
+                    self.sfm_redo();
+                }
+            });
+            return;
+        }
         ctx.input_mut(|i| {
             if i.consume_key(egui::Modifiers::CTRL, egui::Key::S) {
                 let n = self.smart_filename(); self.start_pick(PathPick::SaveConfig(n));
@@ -2036,10 +2613,40 @@ impl eframe::App for ComicInfoApp {
             .frame(egui::Frame::none().fill(theme::BG()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
                 .inner_margin(egui::Margin::symmetric(12.0, 6.0)))
             .show(ctx, |ui| self.show_statusbar(ui));
-        egui::TopBottomPanel::top("tabbar")
-            .frame(egui::Frame::none().fill(theme::SURF()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
-                .inner_margin(egui::Margin::symmetric(14.0, 8.0)))
-            .show(ctx, |ui| self.show_tabbar(ui));
+
+        // Same pattern as the tab-content fade below: elapsed wall-clock
+        // time since the switch was detected, not egui's per-Id
+        // animate_bool_with_time (whose memory would already read
+        // "settled at 1.0" the second time a mode is revisited, showing
+        // no animation at all after the first switch -- exactly the bug
+        // that pattern already avoids for tabs). Detected once per
+        // frame, here, before either mode's own panels render, so both
+        // branches below see the same fresh elapsed/opacity value.
+        if self.settings.single_file_mode != self.prev_single_file_mode {
+            self.prev_single_file_mode = self.settings.single_file_mode;
+            self.mode_switched_at = std::time::Instant::now();
+        }
+        const MODE_FADE_SECS: f32 = 0.18;
+        let mode_elapsed = self.mode_switched_at.elapsed().as_secs_f32();
+        let mode_raw = (mode_elapsed / MODE_FADE_SECS).clamp(0.0, 1.0);
+        if mode_raw < 1.0 { ctx.request_repaint(); }
+        let mode_opacity = 1.0 - (1.0 - mode_raw).powi(3); // ease-out cubic, same curve as the tab fade
+
+        // Tabbar only applies to the batch-processing tabs; skip it
+        // entirely in Single File Mode rather than show it disabled, since
+        // its tabs have no meaning there.
+        if !self.settings.single_file_mode {
+            egui::TopBottomPanel::top("tabbar")
+                .frame(egui::Frame::none().fill(theme::SURF()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
+                    .inner_margin(egui::Margin::symmetric(14.0, 8.0)))
+                .show(ctx, |ui| { ui.set_opacity(mode_opacity); self.show_tabbar(ui); });
+        }
+
+        if self.settings.single_file_mode {
+            self.show_single_file_mode(ctx, mode_opacity);
+            return;
+        }
+
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(theme::BG()))
             .show(ctx, |ui| {
@@ -2068,7 +2675,16 @@ impl eframe::App for ComicInfoApp {
                 let raw = (elapsed / FADE_SECS).clamp(0.0, 1.0);
                 // ease-out cubic, same easing curve as the theme cross-fade
                 let opacity = 1.0 - (1.0 - raw).powi(3);
-                ui.set_opacity(opacity);
+                // Combined with mode_opacity (computed once above, before
+                // this whole branch) rather than used alone: switching
+                // FROM Single File Mode back into batch mode should fade
+                // the newly-active tab in regardless of which specific
+                // tab it happens to land on, not just when the tab
+                // itself changes. Multiplying is correct either way --
+                // both terms settle to 1.0 once their own transition
+                // finishes, so whichever one is still mid-fade is what
+                // dims the result.
+                ui.set_opacity(opacity * mode_opacity);
                 if raw < 1.0 {
                     ctx.request_repaint();
                 }
@@ -2098,30 +2714,41 @@ impl ComicInfoApp {
                 ui.add_space(8.0);
                 let settings_closed_this_frame = self.settings_closing
                     && self.settings_closed_at.elapsed().as_secs_f32() < 0.05;
-                if ui.add(theme::btn_secondary("Settings")).on_hover_text("App settings").clicked()
+                let settings_btn = ui.add(theme::btn_secondary("Settings"));
+                self.settings_btn_rect = settings_btn.rect;
+                if settings_btn.on_hover_text("App settings").clicked()
                     && !settings_closed_this_frame
                 {
                     self.settings_open = true;
                 }
-                ui.add_space(10.0);
-                if ui.add(theme::btn_danger("Reset All")).on_hover_text("Clear all settings (Ctrl+R)").clicked() {
-                    self.dialog = Some(Dialog::ConfirmReset);
+                // Reset All / Import / Load / Save all act on self.cfg,
+                // the batch-processing job config -- there's nothing for
+                // them to do in Single File Mode (which has its own Save,
+                // scoped to the one file being edited, in the editor
+                // panel itself), and leaving them visible would invite
+                // clicking "Save" expecting it to save tag edits it has
+                // no connection to.
+                if !self.settings.single_file_mode {
+                    ui.add_space(10.0);
+                    if ui.add(theme::btn_danger("Reset All")).on_hover_text("Clear all settings (Ctrl+R)").clicked() {
+                        self.dialog = Some(Dialog::ConfirmReset);
+                    }
+                    ui.add_space(6.0);
+                    if ui.add(theme::btn_secondary("Import")).on_hover_text("Merge metadata/rules from a .py or .json into the CURRENT session -- never replaces anything not in the file. (Ctrl+I)").clicked() {
+                        self.start_pick(PathPick::ImportMeta);
+                    }
+                    ui.add_space(4.0);
+                    if ui.add(theme::btn_secondary("Load")).on_hover_text("Load a saved config file, REPLACING the entire current session. (Ctrl+O)").clicked() {
+                        self.start_pick(PathPick::LoadConfig);
+                    }
+                    ui.add_space(4.0);
+                    if ui.add(theme::btn_secondary("Save")).on_hover_text("Save config file (Ctrl+S)").clicked() {
+                        let n = self.smart_filename();
+                        self.start_pick(PathPick::SaveConfig(n));
+                    }
+                    ui.add_space(20.0);
+                    ui.label(RichText::new("Ctrl+S / O / I / R").color(theme::TMUT()).size(10.0));
                 }
-                ui.add_space(6.0);
-                if ui.add(theme::btn_secondary("Import")).on_hover_text("Merge metadata/rules from a .py or .json into the CURRENT session -- never replaces anything not in the file. (Ctrl+I)").clicked() {
-                    self.start_pick(PathPick::ImportMeta);
-                }
-                ui.add_space(4.0);
-                if ui.add(theme::btn_secondary("Load")).on_hover_text("Load a saved config file, REPLACING the entire current session. (Ctrl+O)").clicked() {
-                    self.start_pick(PathPick::LoadConfig);
-                }
-                ui.add_space(4.0);
-                if ui.add(theme::btn_secondary("Save")).on_hover_text("Save config file (Ctrl+S)").clicked() {
-                    let n = self.smart_filename();
-                    self.start_pick(PathPick::SaveConfig(n));
-                }
-                ui.add_space(20.0);
-                ui.label(RichText::new("Ctrl+S / O / I / R").color(theme::TMUT()).size(10.0));
             });
         });
     }
@@ -2220,7 +2847,7 @@ impl ComicInfoApp {
         // the signal to start the closing fade rather than vanishing
         // immediately.
         let mut open = true;
-        egui::Window::new("Settings")
+        let settings_window_resp = egui::Window::new("Settings")
             .title_bar(false)
             .resizable(false)
             .collapsible(false)
@@ -2242,6 +2869,101 @@ impl ComicInfoApp {
                 {
                     self.save_settings();
                 }
+                ui.add_space(10.0);
+                theme::section_hdr(ui, "Mode");
+                {
+                    // Same segmented two-button look as the Theme picker
+                    // right below (reusing its exact row-width math: see
+                    // that block's own comment on why item_spacing.x is
+                    // subtracted, not added, when splitting the row in
+                    // half for two side-by-side buttons).
+                    let row_w = ui.available_width();
+                    let btn_w = (row_w - ui.spacing().item_spacing.x) / 2.0;
+                    let sfm_on_now = self.settings.single_file_mode;
+                    ui.horizontal(|ui| {
+                        for (label, is_sfm, tip) in [
+                            ("Single File Mode", true,
+                                "Switches to a file-tree + ComicInfo.xml editor for \
+                                 working on one file (or a folder of files) at a \
+                                 time, instead of the normal batch-processing tabs."),
+                            ("Batch Mode", false,
+                                "The normal batch-processing tabs: process a whole \
+                                 folder of CBZ files at once."),
+                        ] {
+                            let selected = sfm_on_now == is_sfm;
+                            let mut btn = egui::Button::new(
+                                RichText::new(label).size(12.0)
+                                    .color(if selected { theme::ON_ACCENT() } else { theme::TXT() })
+                            )
+                            .min_size(egui::vec2(btn_w, 26.0));
+                            btn = if selected {
+                                btn.fill(theme::ACC())
+                            } else {
+                                btn.fill(theme::SURF3()).stroke(egui::Stroke::new(1.0_f32, theme::BDR()))
+                            };
+                            if ui.add(btn).on_hover_text(tip).clicked() && !selected {
+                                let sfm_on = is_sfm;
+                                if !sfm_on && self.sfm.dirty() {
+                                    if self.settings.sfm_autosave_on_focus_change {
+                                        // Same as any other focus-change save with
+                                        // this setting on -- silently save instead of
+                                        // prompting, then proceed with the exit.
+                                        self.sfm_save_current();
+                                        self.settings.single_file_mode = sfm_on;
+                                        self.save_settings();
+                                        // self.sfm is deliberately left as-is here --
+                                        // NOT reset to SfmState::default() -- so
+                                        // toggling back into Single File Mode later
+                                        // in this same session finds the same file
+                                        // tree/selection exactly as it was, instead
+                                        // of an empty tree that then has to be
+                                        // re-derived from settings.sfm_last_* (which
+                                        // only really matters across a full app
+                                        // restart, not a same-session mode toggle).
+                                    } else {
+                                        // Leaving the mode with unsaved edits on the
+                                        // current file -- same Save/Discard/Cancel
+                                        // prompt a file-to-file switch would show, not
+                                        // a silent discard. Neither button's selected
+                                        // state changes yet (both read from
+                                        // self.settings.single_file_mode, untouched
+                                        // below) until the prompt resolves.
+                                        self.sfm.pending_nav = Some(SfmNavTarget::ExitMode);
+                                        self.sfm.pending_undo_apply = None;
+                                        self.dialog = Some(Dialog::SfmUnsavedChanges);
+                                    }
+                                } else {
+                                    self.settings.single_file_mode = sfm_on;
+                                    self.save_settings();
+                                    // Same reasoning as the autosave branch above:
+                                    // self.sfm is intentionally NOT reset here either
+                                    // when turning the mode off, so it's still intact
+                                    // if/when the mode is turned back on later this
+                                    // session. Entering the mode (sfm_on == true) with
+                                    // an empty self.sfm (first time this session) is
+                                    // handled by sfm_restore_last_session below.
+                                    if sfm_on && self.sfm.root.is_none() {
+                                        self.sfm_restore_last_session();
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    ui.add_space(4.0);
+                    if self.settings.single_file_mode {
+                        if ui.checkbox(&mut self.settings.sfm_autosave_on_focus_change,
+                            RichText::new("Auto-save on file switch").size(12.0))
+                            .on_hover_text(
+                                "When switching to a different file (or leaving Single \
+                                 File Mode) with unsaved changes, save them automatically \
+                                 instead of asking each time.")
+                            .changed()
+                        {
+                            self.save_settings();
+                        }
+                    }
+                }
+
                 ui.add_space(10.0);
                 theme::section_hdr(ui, "Theme");
                 let current = theme::current_choice();
@@ -2311,6 +3033,30 @@ impl ComicInfoApp {
                 });
             });
 
+        // Click-outside-closes, same behavior as the Add Tag menu:
+        // check for a click this frame that landed outside both the
+        // window's own rect and the toolbar button that opens it
+        // (excluding the button avoids the very click that just opened
+        // Settings also registering as "outside" and immediately
+        // closing it again the same frame -- the window doesn't exist
+        // yet on the frame the button is clicked, so without this
+        // exclusion every open would self-close instantly). Skipped
+        // entirely while already mid-closing-fade (disable_settings_ui)
+        // -- a stray click during that brief fade shouldn't matter, the
+        // close is already in progress.
+        if !disable_settings_ui {
+            if let Some(resp) = &settings_window_resp {
+                let window_rect = resp.response.rect;
+                let clicked_outside = ctx.input(|i| i.pointer.any_click())
+                    && ctx.input(|i| i.pointer.interact_pos())
+                        .map(|pos| !window_rect.contains(pos) && !self.settings_btn_rect.contains(pos))
+                        .unwrap_or(false);
+                if clicked_outside {
+                    open = false;
+                }
+            }
+        }
+
         if !open && !self.settings_closing {
             // The close button was clicked this frame (while genuinely
             // open, not already mid-fade-out) -- start the fade-out
@@ -2341,6 +3087,20 @@ impl ComicInfoApp {
     // The ScrollArea itself is held to exactly `width` so the metadata
     // grid's row-wrapping math (which assumes each field consumes exactly
     // `width` pixels) still holds.
+    //
+    // Known cosmetic limitation, left as-is rather than chasing further:
+    // egui's own maintainer has confirmed ScrollArea isn't customizable
+    // enough from application code to stop it from relocating a nested
+    // scrollbar to stay "visible" when the outer (vertical) ScrollArea
+    // has scrolled this field's own row out of the visible viewport --
+    // that's deliberate on egui's part for other situations (e.g. a wide
+    // table in a narrow container), but here it can occasionally show
+    // this field's scrollbar hovering at the wrong vertical position
+    // once the field itself has scrolled out of view. Several attempts
+    // at a fully custom (non-ScrollArea) replacement each introduced a
+    // worse, harder-to-diagnose regression instead of fixing this
+    // cleanly, so this simpler version -- accepting the occasional
+    // stray-bar glitch -- is the one actually being kept.
     fn scrollable_text_edit(ui: &mut egui::Ui, tag: &str, val: &mut String, width: f32) -> egui::Response {
         let font_id = egui::TextStyle::Body.resolve(ui.style());
         let text_w = ui.fonts(|f| f.layout_no_wrap(val.clone(), font_id, Color32::WHITE).size().x);
@@ -3728,5 +4488,675 @@ impl ComicInfoApp {
                 });
             });
             }); // Frame
+    }
+
+    // ── Single File Mode ──────────────────────────────────────────────────────
+    // Code-editor-style layout: a file tree on the left, the ComicInfo.xml
+    // editor for whichever file is selected on the right. Entirely
+    // separate from the batch-processing tabs' CentralPanel -- called
+    // directly from update() instead of going through show_tabbar/the
+    // Tab enum, since none of that machinery applies here.
+    fn show_single_file_mode(&mut self, ctx: &egui::Context, opacity: f32) {
+        // The file tree and editor each render as their own theme::card()
+        // -- same rounded-box-with-border language every other panel in
+        // this app already uses -- rather than styling the SidePanel/
+        // CentralPanel frames directly. egui's panel frames sit flush
+        // against the window edge and each other with no visible gap,
+        // so rounding them individually wouldn't read as two separated
+        // boxes the way an inner card with breathing room around it
+        // does. The panels themselves stay unstyled/transparent and
+        // exist only for the resizable-width layout mechanics.
+        //
+        // To make each card's painted box actually reach the full height
+        // of its panel (not shrink to fit its content, leaving bare
+        // background below it): per egui's own maintainer, the correct
+        // pattern is ui.allocate_space(ui.available_size()) as the LAST
+        // thing inside the frame's content closure, not something set on
+        // the outer ui beforehand -- that claims the remaining space from
+        // inside the frame's own content_ui, so the frame measures out to
+        // the full size and paints its background/border around all of
+        // it, all the way down.
+        // Both panels use the exact same symmetric margin -- kept
+        // deliberately simple (egui::Margin::symmetric, not a per-side
+        // struct literal) since this project's pinned egui 0.29 takes
+        // f32 margins the way symmetric()/same() already do throughout
+        // this file, but Margin's own field types have changed across
+        // egui versions (newer releases use i8 with a separate MarginF32
+        // for floats), so constructing one field-by-field isn't
+        // something to risk without being able to compile-check it here.
+        // Same value on both panels fixes the top/bottom gap looking
+        // inconsistent between the two boxes; using a smaller value than
+        // before (8.0) also shrinks the doubled-up gap between the two
+        // boxes (tree's right margin + editor's left margin stack
+        // together, so that gap reads wider than a single outer edge
+        // even when every margin is identical) down closer to what a
+        // single edge looks like.
+        let panel_margin = egui::Margin::symmetric(8.0, 8.0);
+
+        egui::SidePanel::left("sfm_file_tree")
+            .frame(egui::Frame::none().fill(theme::BG()).inner_margin(panel_margin))
+            .resizable(true)
+            // The default resize-drag indicator: a vertical line drawn at
+            // the panel boundary regardless of any Frame styling applied
+            // to the panel or its content, since it's a separate visual
+            // element from the panel's own frame. The card already gives
+            // a visible border of its own, so this extra line just reads
+            // as a stray duplicate right next to it.
+            .show_separator_line(false)
+            .default_width(240.0)
+            .width_range(160.0..=420.0)
+            .show(ctx, |ui| {
+                ui.set_opacity(opacity);
+                theme::card().show(ui, |ui| {
+                    self.sfm_file_tree(ui);
+                    ui.allocate_space(ui.available_size());
+                });
+            });
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none().fill(theme::BG()).inner_margin(panel_margin))
+            .show(ctx, |ui| {
+                ui.set_opacity(opacity);
+                theme::card().show(ui, |ui| {
+                    self.sfm_editor_panel(ui);
+                    ui.allocate_space(ui.available_size());
+                });
+            });
+    }
+
+    fn sfm_editor_panel(&mut self, ui: &mut egui::Ui) {
+        match self.sfm.panel.clone() {
+            SfmPanelState::Empty => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(60.0);
+                    ui.label(RichText::new("No file selected").size(14.0).color(theme::TDIM()));
+                });
+            }
+            SfmPanelState::LoadError(msg) => {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(60.0);
+                    ui.label(RichText::new("Couldn't read this file").size(14.0).color(theme::TERR()));
+                    ui.add_space(6.0);
+                    ui.label(RichText::new(msg).size(11.0).color(theme::TDIM()));
+                });
+            }
+            SfmPanelState::NoComicInfo => {
+                let name = self.sfm.selected.and_then(|i| self.sfm.files.get(i))
+                    .map(|f| f.name.clone()).unwrap_or_default();
+                ui.vertical_centered(|ui| {
+                    ui.add_space(60.0);
+                    ui.label(RichText::new(format!("{name} has no ComicInfo.xml"))
+                        .size(14.0).color(theme::TXT()));
+                    ui.add_space(4.0);
+                    ui.label(RichText::new("Title and Series will be filled in from the filename and folder.")
+                        .size(11.0).color(theme::TDIM()));
+                    ui.add_space(12.0);
+                    if ui.add(theme::btn_primary("  Add ComicInfo.xml  ")).clicked() {
+                        self.sfm_create_default();
+                    }
+                });
+            }
+            SfmPanelState::Editing => self.sfm_editor_editing_ui(ui),
+        }
+    }
+
+    fn sfm_editor_editing_ui(&mut self, ui: &mut egui::Ui) {
+        let name = self.sfm.selected.and_then(|i| self.sfm.files.get(i))
+            .map(|f| f.name.clone()).unwrap_or_default();
+        let dirty = self.sfm.dirty();
+        // Snapshot at the very top of the frame, before any widget below
+        // can mutate self.sfm.tags. If this frame turns out to start a
+        // brand new word (pending_undo_word was None coming in), this IS
+        // the correct "before" state for that word's eventual undo
+        // step -- whatever the tags looked like before anything this
+        // frame touched them. If a word was already in progress from an
+        // earlier frame, this snapshot is simply discarded in favor of
+        // the one already held in pending_undo_word.
+        let frame_start_snapshot = self.sfm.tags.clone();
+
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&name).size(15.0).color(theme::TXT()).strong());
+            if dirty {
+                ui.label(RichText::new("(unsaved)").size(11.0).color(theme::TWARN()));
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let save_btn = ui.add_enabled(dirty, theme::btn_primary("  Save  "));
+                if save_btn.clicked() {
+                    self.sfm_save_current();
+                }
+                ui.add_space(6.0);
+                // Tags already present in this file's own tag list are
+                // excluded from the add-menu -- same "can't add a
+                // duplicate" rule the batch-mode metadata field picker
+                // (Dialog::AddMetadataTag) already follows.
+                let existing: HashSet<String> = self.sfm.tags.iter().map(|r| r.tag.clone()).collect();
+                let addable_now: Vec<&'static str> = COMICINFO_FIELDS.iter()
+                    .map(|f| f.tag)
+                    .chain(SFM_EXTRA_KNOWN_TAGS.iter().copied())
+                    .filter(|t| !existing.contains(*t))
+                    .collect();
+                let add_btn = ui.add_enabled(!addable_now.is_empty(), theme::btn_secondary("  Add Tag  "));
+                if add_btn.clicked() {
+                    self.sfm.add_tag_menu_open = !self.sfm.add_tag_menu_open;
+                }
+                if self.sfm.add_tag_menu_open {
+                    self.sfm_add_tag_menu(ui.ctx(), add_btn.rect, frame_start_snapshot.clone());
+                }
+            });
+        });
+        ui.add_space(4.0);
+
+        if let Some(foreign) = &self.sfm.foreign_tags_notice {
+            let list = foreign.join(", ");
+            ui.label(
+                RichText::new(format!(
+                    "This file has {} tag{} not recognized by this app: {list}. \
+                     They're shown below and will be kept if you save.",
+                    foreign.len(), if foreign.len() == 1 { "" } else { "s" }
+                ))
+                .size(11.0).color(theme::TWARN())
+            );
+            ui.add_space(6.0);
+        }
+
+        ui.add_space(4.0);
+
+        let mut remove_id: Option<u64> = None;
+        // Detected inside the show_vec closure below (word boundaries per
+        // row) but can't be acted on there -- show_vec holds self.sfm.tags
+        // mutably borrowed one row at a time for the whole closure, so
+        // there's no way to also touch self.sfm_undo_stack or
+        // self.sfm.pending_undo_word (which needs the FULL tags list, not
+        // one row) from inside it. Collected here, applied after
+        // show_vec returns and the borrow ends.
+        let mut word_boundary_hit = false;
+        // Explicit max_height rather than letting the ScrollArea
+        // auto-size to "fill remaining space" (the default with no
+        // max_height set): egui has a known bug (emilk/egui#3385) where
+        // a single-axis ScrollArea sizing itself this way overflows a
+        // few pixels past its container's own bottom margin instead of
+        // clipping to it -- read available_height() right here, after
+        // everything above (header, notice, add-tag row) has already
+        // been laid out this frame, so it reflects the genuine remaining
+        // room, then hand that to the ScrollArea explicitly so it clips
+        // correctly instead of hitting that overflow path at all.
+        //
+        // The reserved buffer here (SFM_SCROLL_BOTTOM_GAP, shared with
+        // sfm_file_tree's identical fix) needs to be the same fixed
+        // value in both places rather than each computed independently:
+        // this panel and the file tree panel have different amounts of
+        // content above their own ScrollArea (header/notice/add-tag row
+        // here; folder label/separator there), and whether either one's
+        // list is actually long enough to need a scrollbar varies too --
+        // both affect exactly how many pixels egui's own overflow bug
+        // eats. A small buffer (4.0) that happened to look right in one
+        // panel didn't reliably match the other; a larger, shared
+        // constant is a deliberate hedge against that variance rather
+        // than a value tuned to one specific screenshot.
+        let remaining_height = (ui.available_height() - SFM_SCROLL_BOTTOM_GAP).max(0.0);
+        // ScrollStyle::solid() as the base, not just flipping `floating`
+        // on the default: Default::default() for ScrollStyle is actually
+        // floating(), so setting only .floating = false on top of it
+        // leaves every other field (bar_width, margins, ...) at
+        // floating()'s wider values -- still solid-positioned (no more
+        // Remove-button overlap) but visually just as thick as before.
+        // solid() itself already defaults to a slim 6.0-point bar with no
+        // hover-driven growth (that hover-expand behavior is explicitly
+        // a floating-only concept per egui's own docs, so it isn't
+        // available here -- kept a fixed slim width instead of
+        // reintroducing float-over-content just to get that effect
+        // back). Scoped with ui.scope so this only affects these two SFM
+        // ScrollAreas rather than changing scrollbar behavior app-wide.
+        ui.scope(|ui| {
+            let mut scroll_style = egui::style::ScrollStyle::solid();
+            // Correction: bar_outer_margin is the gap between the bar
+            // and the CONTAINER's edge (increasing it pushes the bar
+            // left, away from the edge -- the opposite of what's wanted
+            // here). bar_inner_margin is the actual gap between the
+            // CONTENT (Remove buttons) and the bar, which is what needed
+            // increasing from solid()'s default of 4.0 to push the bar
+            // away from the buttons and closer to the card's edge.
+            scroll_style.bar_inner_margin = 10.0;
+            ui.style_mut().spacing.scroll = scroll_style;
+            egui::ScrollArea::vertical().id_salt("sfm_tags_scroll").max_height(remaining_height).show(ui, |ui| {
+            egui_dnd::dnd(ui, "sfm_tags_dnd")
+                .show_vec(&mut self.sfm.tags, |ui, row, handle, _state| {
+                    let spec = field_spec(&row.tag);
+                    let label = spec.map(|s| s.label).unwrap_or(row.tag.as_str());
+                    let is_foreign = spec.is_none() && !SFM_EXTRA_KNOWN_TAGS.contains(&row.tag.as_str());
+
+                    ui.horizontal(|ui| {
+                        handle.ui(ui, |ui| {
+                            ui.label(RichText::new("::").size(14.0).color(theme::TDIM()));
+                        });
+                        ui.add_space(4.0);
+                        let name_color = if is_foreign { theme::TWARN() } else { theme::TXT() };
+                        ui.label(RichText::new(label).size(12.0).color(name_color).monospace())
+                            .on_hover_text(if is_foreign {
+                                "Not recognized by this app -- kept as-is on save.".to_string()
+                            } else {
+                                spec.map(|s| s.tip.to_string()).unwrap_or_default()
+                            });
+                        ui.add_space(6.0);
+
+                        match spec.map(|s| s.kind) {
+                            Some(FieldKind::Enum(options)) => {
+                                let before = row.value.clone();
+                                egui::ComboBox::from_id_salt(("sfm_tag_cb", row.id))
+                                    .width(220.0)
+                                    .selected_text(row.value.as_str())
+                                    .show_ui(ui, |ui| {
+                                        for opt in options {
+                                            ui.selectable_value(&mut row.value, opt.to_string(), *opt);
+                                        }
+                                    });
+                                // A dropdown pick is always a complete,
+                                // atomic choice -- there's no partial
+                                // "word in progress" concept for an enum
+                                // field the way there is for free text,
+                                // so every change here is its own
+                                // immediate undo step.
+                                if row.value != before { word_boundary_hit = true; }
+                            }
+                            _ => {
+                                // Summary has no FieldSpec (it's one of
+                                // SFM_EXTRA_KNOWN_TAGS, excluded from the
+                                // registry -- see that const's own
+                                // comment), so it would otherwise fall
+                                // through to the same flat 230.0 default
+                                // every other unspecified tag gets. That
+                                // reads as cramped for what's normally a
+                                // full paragraph -- 560.0 matches the
+                                // width the batch-mode Summary Rules
+                                // column already uses for the same field
+                                // elsewhere in this app, rather than
+                                // picking a new number. (A multi-line
+                                // text area was also tried for Summary
+                                // specifically, but reverted: it
+                                // correlated with a large, unexplained
+                                // empty gap appearing at the top of the
+                                // WHOLE tag list, on every file --
+                                // including ones without a Summary row
+                                // at all once one had ever been rendered
+                                // in the session -- and the actual cause
+                                // was never conclusively identified
+                                // despite ruling out egui_dnd's handle
+                                // logic, the card-fill allocate_space
+                                // call, and stale scroll position. Back
+                                // to the single-line scrollable box,
+                                // confirmed working, until a real root
+                                // cause is found.
+                                let width = spec.map(|s| s.width)
+                                    .unwrap_or(if row.tag == "Summary" { 560.0 } else { 230.0 });
+                                let resp = Self::scrollable_text_edit(ui, &row.tag, &mut row.value, width);
+                                if resp.changed() {
+                                    // A boundary character just landed at
+                                    // the end of the value (the character
+                                    // just typed, since TextEdit only
+                                    // grows/shrinks from wherever the
+                                    // cursor is -- checking the tail is a
+                                    // reasonable proxy without needing
+                                    // the actual cursor position or a
+                                    // full diff against the previous
+                                    // value) -- or focus just left the
+                                    // field entirely, which always ends
+                                    // whatever word was in progress
+                                    // regardless of the character at the
+                                    // cursor.
+                                    let ends_word = row.value.ends_with(|c: char| c.is_whitespace())
+                                        || resp.lost_focus();
+                                    if ends_word { word_boundary_hit = true; }
+                                }
+                            }
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(RichText::new("Remove").size(11.0).color(theme::TDIM())))
+                                .clicked()
+                            {
+                                remove_id = Some(row.id);
+                            }
+                        });
+                    });
+                    ui.add_space(4.0);
+                });
+            });
+        });
+        if let Some(id) = remove_id {
+            self.sfm.tags.retain(|r| r.id != id);
+            // Removing a row is its own immediate, atomic undo step, same
+            // reasoning as an enum dropdown pick -- there's no sense in
+            // which "delete this tag" is part of a word in progress.
+            self.sfm_push_undo(frame_start_snapshot.clone());
+        } else if word_boundary_hit {
+            // Commit whichever snapshot represents "before this word":
+            // one already in progress from an earlier frame, or (if none
+            // was) the one taken at the top of this same frame -- see
+            // frame_start_snapshot's comment above for why that's
+            // correct even for a word that starts and ends in one frame.
+            let before = self.sfm.pending_undo_word.take().unwrap_or(frame_start_snapshot);
+            self.sfm_push_undo(before);
+        } else if self.sfm.tags != frame_start_snapshot {
+            // Something changed this frame without crossing a text-edit
+            // word boundary. Two real cases land here: mid-word typing
+            // (track as in-progress, same as before), or a drag-reorder
+            // (every row's id+value pair is still present, just in a
+            // different order) -- which has no "word in progress"
+            // concept at all and should commit immediately, same as
+            // add/remove/enum-pick, not wait for a boundary that will
+            // never come.
+            let same_rows_different_order = {
+                let mut a: Vec<(u64, &String)> = self.sfm.tags.iter().map(|r| (r.id, &r.value)).collect();
+                let mut b: Vec<(u64, &String)> = frame_start_snapshot.iter().map(|r| (r.id, &r.value)).collect();
+                a.sort_by_key(|(id, _)| *id);
+                b.sort_by_key(|(id, _)| *id);
+                a == b
+            };
+            if same_rows_different_order {
+                self.sfm_push_undo(frame_start_snapshot);
+            } else if self.sfm.pending_undo_word.is_none() {
+                self.sfm.pending_undo_word = Some(frame_start_snapshot);
+            }
+        }
+    }
+
+    /// Renders the floating "Add Tag" menu (a plain egui::Window used
+    /// as a manually-positioned popup -- see add_tag_menu_open's own
+    /// comment for why a real ComboBox couldn't do this on egui 0.29)
+    /// anchored just under `anchor_rect` (the Add Tag button's own
+    /// rect). Clicking a tag adds it and leaves the menu open so more
+    /// tags can be added in one go; the menu only closes via an
+    /// explicit click outside both the window and the button itself.
+    fn sfm_add_tag_menu(&mut self, ctx: &egui::Context, anchor_rect: egui::Rect, frame_start_snapshot: Vec<SfmTagRow>) {
+        let existing: HashSet<String> = self.sfm.tags.iter().map(|r| r.tag.clone()).collect();
+        let mut addable: Vec<&'static str> = COMICINFO_FIELDS.iter()
+            .map(|f| f.tag)
+            .chain(SFM_EXTRA_KNOWN_TAGS.iter().copied())
+            .filter(|t| !existing.contains(*t))
+            .collect();
+        addable.sort();
+        if addable.is_empty() {
+            // Every addable tag has already been added since the menu
+            // was opened (e.g. the user added the last remaining one
+            // this same session) -- nothing left to show, so close
+            // automatically rather than leave an empty floating window
+            // up with nothing to click.
+            self.sfm.add_tag_menu_open = false;
+            return;
+        }
+
+        let mut menu_rect = anchor_rect; // fallback if the Window is somehow never actually shown below
+        let mut to_add: Option<&'static str> = None;
+        egui::Window::new("sfm_add_tag_menu")
+            .title_bar(false)
+            .resizable(false)
+            .collapsible(false)
+            // pivot(RIGHT_TOP) + the button's own bottom-RIGHT corner:
+            // the menu's right edge stays aligned with the button's
+            // right edge and grows leftward, regardless of how wide its
+            // content (the longest tag label) ends up making it. With
+            // the default pivot (LEFT_TOP) anchored to the button's
+            // bottom-left instead, a menu wider than the button drifts
+            // further left the wider it gets, which is what was making
+            // it look unanchored/disconnected from the button that
+            // opened it.
+            .pivot(egui::Align2::RIGHT_TOP)
+            .fixed_pos(anchor_rect.right_bottom() + egui::vec2(0.0, 4.0))
+            .frame(theme::card())
+            .show(ctx, |ui| {
+                const MENU_WIDTH: f32 = 200.0;
+                ui.set_min_width(MENU_WIDTH);
+                // Same slim, non-overlapping scrollbar style used for
+                // the file tree and tag list elsewhere in Single File
+                // Mode -- solid() (reserves its own width, doesn't
+                // overlay on top of the tag labels) rather than the
+                // default floating style, which read as thick and was
+                // sitting on top of the last visible label.
+                ui.scope(|ui| {
+                    ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+                    // max_width matched to MENU_WIDTH (not left to grow
+                    // to the window's own width independently), and
+                    // each label given that same explicit width via
+                    // min_size -- without both of these, a
+                    // selectable_label only ever claims as much width
+                    // as its own text needs, leaving a gap of bare card
+                    // background between the shortest labels and the
+                    // scrollbar sitting at the window's true right edge.
+                    egui::ScrollArea::vertical().max_height(280.0).max_width(MENU_WIDTH).show(ui, |ui| {
+                        for tag in &addable {
+                            let label = field_spec(tag).map(|s| s.label).unwrap_or(tag);
+                            let resp = ui.add_sized(
+                                egui::vec2(ui.available_width(), 22.0),
+                                egui::SelectableLabel::new(false, label),
+                            );
+                            if resp.clicked() {
+                                to_add = Some(tag);
+                            }
+                        }
+                    });
+                });
+                menu_rect = ui.min_rect();
+            });
+
+        if let Some(tag) = to_add {
+            let id = self.sfm.next_row_id;
+            self.sfm.next_row_id += 1;
+            self.sfm.tags.push(SfmTagRow { tag: tag.to_string(), value: String::new(), id });
+            // Adding a row is its own atomic undo step, same reasoning
+            // as Remove and an enum pick. Deliberately does NOT close
+            // the menu (add_tag_menu_open untouched) -- see this
+            // function's own doc comment.
+            self.sfm_push_undo(frame_start_snapshot);
+        }
+
+        // Close on a click that's outside both the menu window and the
+        // button that opened it (excluding the button avoids the same
+        // click that just toggled the menu open from also immediately
+        // registering as an outside-click and closing it again in the
+        // same frame).
+        let clicked_outside = ctx.input(|i| i.pointer.any_click())
+            && ctx.input(|i| i.pointer.interact_pos())
+                .map(|pos| !menu_rect.contains(pos) && !anchor_rect.contains(pos))
+                .unwrap_or(false);
+        if clicked_outside {
+            self.sfm.add_tag_menu_open = false;
+        }
+    }
+
+    /// Pushes `before` (the tag list as it was immediately before the
+    /// change that just happened) onto the undo stack for whichever file
+    /// is currently selected, truncating any redo entries ahead of the
+    /// cursor first -- standard undo/redo semantics: a fresh edit made
+    /// after undoing invalidates whatever redo history existed past that
+    /// point, same as any text editor.
+    /// Records one completed change: `before` is the tag list as it was
+    /// immediately prior, `self.sfm.tags` (read at call time) is the
+    /// "after" -- undo applies `before`, redo applies `after`, perfectly
+    /// symmetric. Truncates any redo entries ahead of the cursor first --
+    /// standard undo/redo semantics: a fresh edit made after undoing
+    /// invalidates whatever redo history existed past that point, same
+    /// as any text editor.
+    fn sfm_push_undo(&mut self, before: Vec<SfmTagRow>) {
+        let Some(idx) = self.sfm.selected else { return };
+        let Some(entry) = self.sfm.files.get(idx) else { return };
+        self.sfm_undo_stack.truncate(self.sfm_undo_cursor);
+        self.sfm_undo_stack.push(SfmUndoEntry {
+            file: entry.path.clone(),
+            before,
+            after: self.sfm.tags.clone(),
+        });
+        self.sfm_undo_cursor = self.sfm_undo_stack.len();
+    }
+
+    /// Ctrl+Z. Applies entry[cursor - 1].before, switching to whichever
+    /// file it belongs to first if that isn't the one currently open (per
+    /// the answered design question: if the current file also has
+    /// unsaved changes, auto-save-on-focus-change decides whether that's
+    /// a silent save-then-jump or the usual prompt -- a save doesn't
+    /// invalidate the ability to undo further back later, since undo
+    /// operates on the stack's own snapshots, not on dirty-vs-saved
+    /// state).
+    fn sfm_undo(&mut self) {
+        if self.sfm_undo_cursor == 0 { return; }
+        let entry = self.sfm_undo_stack[self.sfm_undo_cursor - 1].clone();
+        // Whatever word/edit was in progress on the CURRENT file doesn't
+        // get its own undo step just because undo was pressed mid-word --
+        // it's simply abandoned in favor of jumping to the target state.
+        self.sfm.pending_undo_word = None;
+        self.sfm_undo_cursor -= 1;
+        let target_file = entry.file.clone();
+        let tags = entry.before;
+        self.sfm_goto_undo_entry(target_file, tags);
+    }
+
+    /// Ctrl+Y. Mirror of sfm_undo: applies entry[cursor].after and moves
+    /// the cursor forward instead of back.
+    fn sfm_redo(&mut self) {
+        if self.sfm_undo_cursor >= self.sfm_undo_stack.len() { return; }
+        let entry = self.sfm_undo_stack[self.sfm_undo_cursor].clone();
+        self.sfm.pending_undo_word = None;
+        self.sfm_undo_cursor += 1;
+        let target_file = entry.file.clone();
+        let tags = entry.after;
+        self.sfm_goto_undo_entry(target_file, tags);
+    }
+
+    /// Shared by undo and redo: gets onto `target_file` (immediately if
+    /// it's already the open file or the switch needs no prompt, or via
+    /// the deferred pending_undo_apply + pending_nav path if a prompt is
+    /// needed first), then applies `tags`.
+    fn sfm_goto_undo_entry(&mut self, target_file: PathBuf, tags: Vec<SfmTagRow>) {
+        let already_open = self.sfm.selected
+            .and_then(|i| self.sfm.files.get(i))
+            .map(|f| f.path == target_file)
+            .unwrap_or(false);
+
+        if already_open {
+            self.sfm_apply_undo_tags(tags);
+            return;
+        }
+
+        let Some(target_idx) = self.sfm.files.iter().position(|f| f.path == target_file) else {
+            // The undone/redone edit belongs to a file that isn't in the
+            // CURRENTLY open folder's tree at all (a different folder or
+            // single file was opened since) -- nothing sensible to jump
+            // to, so just drop this step rather than silently doing
+            // nothing with no explanation.
+            self.dialog = Some(Dialog::Notice(
+                "Can't jump to that change -- the file it belongs to isn't open right now.".to_string()
+            ));
+            return;
+        };
+
+        if self.sfm.dirty() {
+            if self.settings.sfm_autosave_on_focus_change {
+                self.sfm_save_current();
+                self.sfm_switch_to(target_idx);
+                self.sfm_apply_undo_tags(tags);
+            } else {
+                self.sfm.pending_nav = Some(SfmNavTarget::File(target_idx));
+                self.sfm.pending_undo_apply = Some(tags);
+                self.dialog = Some(Dialog::SfmUnsavedChanges);
+            }
+        } else {
+            self.sfm_switch_to(target_idx);
+            self.sfm_apply_undo_tags(tags);
+        }
+    }
+
+    /// Replaces the editor's current tags with `tags` (an undo/redo
+    /// target state) without touching loaded_tags -- deliberately, so
+    /// dirty() correctly reads true when the undone/redone state differs
+    /// from what's actually saved on disk, same as any other edit.
+    fn sfm_apply_undo_tags(&mut self, tags: Vec<SfmTagRow>) {
+        self.sfm.tags = tags;
+    }
+
+    fn sfm_file_tree(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui.add(theme::btn_secondary("Open File")).clicked() {
+                self.start_pick(PathPick::SfmFile);
+            }
+            if ui.add(theme::btn_secondary("Open Folder")).clicked() {
+                self.start_pick(PathPick::SfmFolder);
+            }
+        });
+        ui.add_space(8.0);
+
+        if let Some(root) = &self.sfm.root {
+            let label = root.file_name().map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.to_string_lossy().into_owned());
+            ui.label(RichText::new(label).size(11.0).color(theme::TDIM()).italics());
+            ui.add_space(6.0);
+        }
+        ui.separator();
+        ui.add_space(4.0);
+
+        if self.sfm.files.is_empty() {
+            ui.add_space(20.0);
+            ui.vertical_centered(|ui| {
+                ui.label(RichText::new("Open a file or folder to get started.")
+                    .size(12.0).color(theme::TDIM()));
+            });
+            return;
+        }
+
+        // See sfm_editor_editing_ui's identical fix and
+        // SFM_SCROLL_BOTTOM_GAP's own comment for why max_height is set
+        // explicitly here (emilk/egui#3385) using that same shared
+        // constant rather than a value picked independently for this
+        // panel.
+        let remaining_height = (ui.available_height() - SFM_SCROLL_BOTTOM_GAP).max(0.0);
+        // See sfm_editor_editing_ui's identical fix and comment: uses the
+        // full ScrollStyle::solid() preset (slim, fixed-width bar with no
+        // hover growth) rather than just flipping `floating` on the
+        // default style, which would leave the bar at its wider
+        // floating()-preset dimensions. Scoped so it only affects this
+        // one ScrollArea.
+        ui.scope(|ui| {
+            // See sfm_editor_editing_ui's corrected comment: this needed
+            // bar_inner_margin (gap between content and bar), not
+            // bar_outer_margin (gap between bar and container edge,
+            // which pushes the wrong direction).
+            let mut scroll_style = egui::style::ScrollStyle::solid();
+            scroll_style.bar_inner_margin = 10.0;
+            ui.style_mut().spacing.scroll = scroll_style;
+            egui::ScrollArea::vertical().id_salt("sfm_tree_scroll").max_height(remaining_height).show(ui, |ui| {
+            // Collected rather than acted on inline: iterating
+            // self.sfm.files while also wanting to call
+            // self.sfm_request_select(idx) (which needs &mut self, i.e.
+            // a second mutable borrow of self while files is already
+            // borrowed via self.sfm.files.iter()) doesn't borrow-check.
+            let mut clicked_idx = None;
+            for (idx, entry) in self.sfm.files.iter().enumerate() {
+                let selected = self.sfm.selected == Some(idx);
+                let enabled = entry.is_cbz;
+                let color = if !enabled {
+                    theme::TMUT()
+                } else if selected {
+                    theme::ON_ACCENT()
+                } else {
+                    theme::TXT()
+                };
+                let btn = egui::Button::new(RichText::new(&entry.name).size(12.0).color(color))
+                    .fill(if selected { theme::ACC() } else { Color32::TRANSPARENT })
+                    .min_size(egui::vec2(ui.available_width(), 24.0));
+                let resp = ui.add_enabled(enabled, btn);
+                let was_clicked = resp.clicked();
+                if enabled {
+                    resp.on_hover_text(if selected { "Currently open".to_string() }
+                        else { "Click to open".to_string() });
+                } else {
+                    resp.on_hover_text("Not a .cbz file");
+                }
+                if was_clicked {
+                    clicked_idx = Some(idx);
+                }
+            }
+            if let Some(idx) = clicked_idx {
+                self.sfm_request_select(idx);
+            }
+            });
+        });
     }
 }

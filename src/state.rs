@@ -187,6 +187,37 @@ pub struct AppSettings {
     // different series' saved job config.
     #[serde(default)]
     pub theme: crate::theme::ThemeChoice,
+    // Whether the app is currently showing Single File Mode's file-tree +
+    // ComicInfo.xml editor layout instead of the normal batch-processing
+    // tabs. An app-wide UI-mode preference, not something that should
+    // live in AppConfig and flip along with loading someone else's saved
+    // job config -- same reasoning as theme above.
+    #[serde(default)]
+    pub single_file_mode: bool,
+    // Single File Mode's last-open root (a single file or a folder) and,
+    // if it was a folder, which file inside it was selected -- restored
+    // on next launch/re-entry so leaving the mode (or quitting the app
+    // entirely) doesn't drop the user back to an empty file tree. A path
+    // rather than a list index for sfm_last_selected: indices shift if
+    // the folder's contents change between sessions (a file added,
+    // removed, or renamed), but the exact path either still resolves to
+    // the same real file or it doesn't -- see SfmState::restore_notice
+    // for what happens when it doesn't.
+    #[serde(default)]
+    pub sfm_last_root:      Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub sfm_last_is_folder: bool,
+    #[serde(default)]
+    pub sfm_last_selected:  Option<std::path::PathBuf>,
+    // If on, switching to a different file (or leaving Single File Mode)
+    // silently saves the currently-edited file's changes instead of
+    // showing the Save/Discard/Cancel prompt. Off by default -- silent
+    // saving-on-navigation is a real behavior change from every other
+    // save path in this app (which always require an explicit action),
+    // so it should be something the user opts into rather than a
+    // surprise the first time they tab away mid-edit.
+    #[serde(default)]
+    pub sfm_autosave_on_focus_change: bool,
 }
 
 impl Default for AppSettings {
@@ -196,6 +227,11 @@ impl Default for AppSettings {
             play_sound_on_completion: true,  // convenience feature: on by default, easy to disable if noisy
             preferred_tag_order: None,
             theme: crate::theme::ThemeChoice::default(),
+            single_file_mode: false,
+            sfm_last_root: None,
+            sfm_last_is_folder: false,
+            sfm_last_selected: None,
+            sfm_autosave_on_focus_change: false,
         }
     }
 }

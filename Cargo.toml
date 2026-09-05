@@ -37,6 +37,13 @@ serde_json = "1"
 # ── CBZ / ZIP ─────────────────────────────────────────────────────────────────
 zip = { version = "2", default-features = false, features = ["deflate"] }
 
+# ── ComicInfo.xml parsing (Single File Mode reads existing XML from
+# arbitrary CBZs, possibly written by other tools -- a real parser handles
+# escaping/CDATA/attributes correctly where hand-rolled regex would not;
+# the write path stays string-templated in processing.rs since it only
+# ever emits XML this app itself generates and controls) ────────────────
+quick-xml = "0.36"
+
 # ── Parallel processing ───────────────────────────────────────────────────────
 rayon = "1"
 

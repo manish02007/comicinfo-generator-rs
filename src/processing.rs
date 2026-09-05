@@ -339,6 +339,154 @@ pub fn build_comic_info_xml(data: &HashMap<String, String>, order: &[String]) ->
     xml
 }
 
+// ── CBZ read (Single File Mode) ─────────────────────────────────────────────
+/// Un-escapes the 5 standard XML entities. Deliberately not using
+/// quick-xml's own unescape/decode methods here -- their exact name and
+/// signature has genuinely moved around across quick-xml versions (decode
+/// vs unescape vs unescape_and_decode, at different points), so pinning
+/// code to whichever one happens to match the resolved patch version is
+/// fragile. This app's own writer (escape_xml above) only ever produces
+/// these 5 entities, and they're the only ones the XML spec itself
+/// requires every parser to support -- numeric character references
+/// (&#65;) and custom DTD entities are out of scope, same as escape_xml
+/// never producing them on the write side.
+fn unescape_xml_entities(s: &str) -> String {
+    // &amp; must be handled last, or "&amp;lt;" would wrongly become "<"
+    // instead of the correct "&lt;".
+    s.replace("&lt;", "<")
+     .replace("&gt;", ">")
+     .replace("&quot;", "\"")
+     .replace("&apos;", "'")
+     .replace("&amp;", "&")
+}
+
+/// Result of looking for ComicInfo.xml inside a CBZ.
+pub enum ComicInfoReadResult {
+    /// Parsed successfully. Order matches the file's own tag order, so an
+    /// unmodified round-trip (read then immediately write) reproduces the
+    /// same tag sequence rather than resorting to canonical/user order.
+    Found(Vec<(String, String)>),
+    /// The archive opened fine but has no ComicInfo.xml entry -- the "Add
+    /// ComicInfo.xml" prompt case, not an error.
+    Missing,
+}
+
+/// Reads and parses ComicInfo.xml out of a CBZ, if present. Uses a real XML
+/// parser (quick-xml) for structure (tags/nesting/self-closing elements)
+/// rather than regex/string-splitting -- unlike the batch pipeline's write
+/// path, which only ever emits XML this app itself generated and fully
+/// controls, this reads arbitrary files that may have been tagged by other
+/// tools (ComicRack, ComicTagger, ...), so it needs to correctly handle
+/// nesting and tags this app doesn't know about, which a hand-rolled
+/// parser would get wrong in the general case. Entity unescaping itself
+/// is handled locally (see unescape_xml_entities) rather than through
+/// quick-xml's own decode/unescape methods -- see that function's comment
+/// for why. Returns Err only when the CBZ itself can't be opened/read as a
+/// zip (corrupt file, not a real archive) -- a missing ComicInfo.xml entry
+/// inside an otherwise-valid archive is Ok(Missing), not an error.
+pub fn read_comic_info_from_cbz(path: &Path) -> std::io::Result<ComicInfoReadResult> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+    use zip::ZipArchive;
+
+    let file = std::fs::File::open(path)?;
+    let mut archive = ZipArchive::new(file)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+    // Iterate by index and compare names, matching the pattern already
+    // established in write_comic_info_xml_to below, rather than by_name --
+    // keeps exactly one proven-working way of locating an entry in this
+    // codebase instead of two slightly different ones.
+    let mut found_index: Option<usize> = None;
+    for i in 0..archive.len() {
+        let f = archive.by_index(i)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        if f.name() == "ComicInfo.xml" { found_index = Some(i); break; }
+    }
+    let Some(idx) = found_index else { return Ok(ComicInfoReadResult::Missing) };
+
+    let mut xml_bytes = String::new();
+    {
+        use std::io::Read;
+        let mut entry = archive.by_index(idx)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        entry.read_to_string(&mut xml_bytes)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData,
+                format!("ComicInfo.xml is present but not valid UTF-8 text: {e}")))?;
+    }
+
+    let mut reader = Reader::from_str(&xml_bytes);
+    reader.config_mut().trim_text(true);
+
+    let mut tags: Vec<(String, String)> = Vec::new();
+    let mut current_tag: Option<String> = None;
+    let mut current_text = String::new();
+    let mut buf = Vec::new();
+    // depth counts elements currently open, including <ComicInfo> itself:
+    // <ComicInfo> -> depth 1, a child like <Title> -> depth 2. Direct
+    // children of the root are therefore depth == 2, not depth == 1 (that
+    // would be <ComicInfo> itself). Tracked this way -- rather than
+    // special-casing the root tag name -- so a foreign file with an
+    // unexpected or differently-cased root element still has its direct
+    // children read correctly instead of silently producing zero tags.
+    let mut depth: u32 = 0;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Err(e) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,
+                format!("ComicInfo.xml is malformed: {e}"))),
+            Ok(Event::Eof) => break,
+            Ok(Event::Start(e)) => {
+                depth += 1;
+                if depth == 2 {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                    current_tag = Some(name);
+                    current_text.clear();
+                }
+            }
+            // Self-closing tags (<Volume/>) never emit a matching Start+End
+            // pair -- quick-xml reports them as a single Empty event
+            // instead. Without handling this separately, a self-closing
+            // empty tag (a real, common shape for fields like Volume that
+            // are often blank) would silently vanish instead of round-
+            // tripping as an empty-value tag.
+            Ok(Event::Empty(e)) => {
+                // depth is not incremented for Empty (there's no matching
+                // Start to pair it with) -- depth == 1 means we're
+                // currently inside <ComicInfo> itself, so this self-
+                // closing tag is one of its direct children.
+                if depth == 1 {
+                    let name = String::from_utf8_lossy(e.name().as_ref()).into_owned();
+                    tags.push((name, String::new()));
+                }
+            }
+            Ok(Event::Text(e)) => {
+                if current_tag.is_some() {
+                    let raw = String::from_utf8_lossy(e.as_ref());
+                    current_text.push_str(&unescape_xml_entities(&raw));
+                }
+            }
+            Ok(Event::CData(e)) => {
+                if current_tag.is_some() {
+                    current_text.push_str(&String::from_utf8_lossy(e.as_ref()));
+                }
+            }
+            Ok(Event::End(_)) => {
+                if depth == 2 {
+                    if let Some(tag) = current_tag.take() {
+                        tags.push((tag, std::mem::take(&mut current_text)));
+                    }
+                }
+                depth = depth.saturating_sub(1);
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    Ok(ComicInfoReadResult::Found(tags))
+}
+
 // ── CBZ write ─────────────────────────────────────────────────────────────────
 /// Reads `src_path`'s CBZ contents, replaces ComicInfo.xml, and writes the
 /// result to `dest_path`. When `dest_path == src_path` this overwrites the
